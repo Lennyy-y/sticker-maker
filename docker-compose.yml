@@ -10,6 +10,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    expose:
+      - "3001"
     volumes:
       - wa-session-data:/usr/src/app/.wwebjs_auth
       - ./src:/usr/src/app/src
@@ -17,6 +19,28 @@ services:
       - NODE_ENV=development
       - MATTING_API_URL=http://video-matting:8000
     command: ["sh", "-c", "find /usr/src/app/.wwebjs_auth -name 'SingletonLock' -delete 2>/dev/null; exec ./node_modules/.bin/ts-node src/index.ts"]
+
+  # --- Web Dashboard ---
+  web-gui:
+    build: ./web-gui
+    container_name: wa-sticker-gui
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "3000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+    environment:
+      - BOT_WS_URL=http://sticker-bot:3001
+      - COMPOSE_FILE=/app/docker-compose.yml
+      - COMPOSE_PROJECT_NAME=sticker-maker
+    depends_on:
+      - sticker-bot
 
   # --- SAM 2.1 GPU Segmentation Service (only with --profile gpu) ---
   video-matting:
