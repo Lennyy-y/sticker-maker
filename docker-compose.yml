@@ -1,0 +1,42 @@
+services:
+  # --- Your existing Node.js Bot ---
+  sticker-bot:
+    build: .
+    container_name: wa-sticker-bot
+    restart: unless-stopped
+    init: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - wa-session-data:/usr/src/app/.wwebjs_auth
+      - ./src:/usr/src/app/src
+    environment:
+      - NODE_ENV=development
+      # Tell the bot where the Python API lives on the internal Docker network
+      - MATTING_API_URL=http://video-matting:8000
+    command: ["sh", "-c", "find /usr/src/app/.wwebjs_auth -name 'SingletonLock' -delete 2>/dev/null; exec ./node_modules/.bin/ts-node src/index.ts"]
+    depends_on:
+      - video-matting # Ensures the API boots before the bot connects
+
+  # --- SAM 2.1 GPU Segmentation Service ---
+  video-matting:
+    build: ./matting-service
+    container_name: video-matting-api
+    restart: unless-stopped
+    shm_size: '8g'
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  wa-session-data:
