@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse, Response
 from PIL import Image
 import numpy as np
@@ -237,7 +237,8 @@ async def process_image(file: UploadFile = File(...)):
         if scale_factor > 1:
             mask = np.array(Image.fromarray(mask).resize((orig_w, orig_h), Image.NEAREST))
 
-        rgba = np.dstack([img_np, mask])
+        img_clean = img_np * (mask[:, :, np.newaxis] > 0)
+        rgba = np.dstack([img_clean, mask])
         result = Image.fromarray(rgba, "RGBA")
 
         bbox = result.getbbox()
@@ -353,6 +354,12 @@ async def process_video(file: UploadFile = File(...)):
 
             video_predictor.reset_state(state)
 
+        # Frame 0's mask is from sparse point/box prompts with no temporal
+        # context, so it often has edge artifacts. Frame 1's temporally
+        # propagated mask is much cleaner — copy it to frame 0.
+        if 1 in video_masks:
+            video_masks[0] = video_masks[1]
+
         print(f"[SAM2 Video] Propagation complete: {len(video_masks)} frames masked")
 
         # 4. Apply masks to original frames and compute global bounding box.
@@ -369,7 +376,8 @@ async def process_video(file: UploadFile = File(...)):
             if alpha.shape[0] != h or alpha.shape[1] != w:
                 alpha = np.array(Image.fromarray(alpha).resize((w, h), Image.NEAREST))
 
-            rgba = np.dstack([frame_rgb, alpha])
+            frame_clean = frame_rgb * (alpha[:, :, np.newaxis] > 0)
+            rgba = np.dstack([frame_clean, alpha])
             pil_frame = Image.fromarray(rgba, "RGBA")
 
             bbox = pil_frame.getbbox()
