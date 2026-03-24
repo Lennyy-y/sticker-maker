@@ -66,6 +66,18 @@ async function buildTextOverlayImage(browser: any, topText: string, bottomText: 
 // PIPELINE STAGE 1: Background Removal
 // ============================================================
 
+class MattingServiceUnavailableError extends Error {
+    constructor() {
+        super('GPU matting service is not running. Start with: docker compose --profile gpu up');
+        this.name = 'MattingServiceUnavailableError';
+    }
+}
+
+function isMattingConnectionError(err: any): boolean {
+    const code = err?.code || err?.cause?.code;
+    return code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ERR_BAD_REQUEST';
+}
+
 /** Remove background from a static image using the SAM2 GPU service */
 async function removeBackgroundFromImage(buffer: Buffer): Promise<Buffer> {
     const cleanPng = await sharp(buffer).toFormat('png').toBuffer();
@@ -73,13 +85,17 @@ async function removeBackgroundFromImage(buffer: Buffer): Promise<Buffer> {
     const form = new FormData();
     form.append('file', cleanPng, { filename: 'input.png', contentType: 'image/png' });
 
-    const response = await axios.post('http://video-matting:8000/process-image', form, {
-        headers: form.getHeaders(),
-        responseType: 'arraybuffer',
-        timeout: 60000
-    });
-
-    return Buffer.from(response.data);
+    try {
+        const response = await axios.post('http://video-matting:8000/process-image', form, {
+            headers: form.getHeaders(),
+            responseType: 'arraybuffer',
+            timeout: 60000
+        });
+        return Buffer.from(response.data);
+    } catch (err: any) {
+        if (isMattingConnectionError(err)) throw new MattingServiceUnavailableError();
+        throw err;
+    }
 }
 
 /** Remove background from a video using the Python GPU matting service.
@@ -89,24 +105,27 @@ async function removeBackgroundFromVideo(buffer: Buffer): Promise<{framesDir: st
     const form = new FormData();
     form.append('file', buffer, { filename: 'input.mp4', contentType: 'video/mp4' });
 
-    const response = await axios.post('http://video-matting:8000/process', form, {
-        headers: form.getHeaders(),
-        responseType: 'arraybuffer',
-        timeout: 120000
-    });
+    let response;
+    try {
+        response = await axios.post('http://video-matting:8000/process', form, {
+            headers: form.getHeaders(),
+            responseType: 'arraybuffer',
+            timeout: 120000
+        });
+    } catch (err: any) {
+        if (isMattingConnectionError(err)) throw new MattingServiceUnavailableError();
+        throw err;
+    }
 
-    // Extract the tar archive of PNG frames from Python service
     const timestamp = Date.now();
     const tarPath = path.join('/tmp', `matting_${timestamp}.tar`);
     const framesDir = path.join('/tmp', `matting_frames_${timestamp}`);
     mkdirSync(framesDir, { recursive: true });
     writeFileSync(tarPath, Buffer.from(response.data));
 
-    // Extract tar
     await execAsync(`tar xf ${tarPath} -C ${framesDir}`);
     unlinkSync(tarPath);
 
-    // Read fps from meta.json
     const meta = JSON.parse(readFileSync(path.join(framesDir, 'meta.json'), 'utf-8'));
     console.log(`[Matting] Extracted ${meta.frame_count} PNG frames at ${meta.fps} fps`);
     
@@ -213,17 +232,19 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
         const webpFramesDir = path.join(pngFramesDir, 'webps');
         mkdirSync(webpFramesDir, { recursive: true });
 
+        const cwebpAlphaFlags = opts.borderless ? '-exact -alpha_q 100' : '';
         for (const f of frameFiles) {
             const pngPath = path.join(pngFramesDir, f);
             const webpPath = path.join(webpFramesDir, f.replace('.png', '.webp'));
-            await execAsync(`cwebp -quiet -lossy -q ${profile.q} "${pngPath}" -o "${webpPath}"`);
+            await execAsync(`cwebp -quiet -q ${profile.q} ${cwebpAlphaFlags} "${pngPath}" -o "${webpPath}"`);
         }
 
         const muxArgs = frameFiles
             .map(f => `-frame ${path.join(webpFramesDir, f.replace('.png', '.webp'))} +${frameDurationMs}+0+0+1-b`)
             .join(' ');
 
-        await execAsync(`webpmux ${muxArgs} -loop 0 -o ${tempOutput}`);
+        const bgFlag = opts.borderless ? '-bgcolor 0,0,0,0' : '';
+        await execAsync(`webpmux ${muxArgs} -loop 0 ${bgFlag} -o ${tempOutput}`);
 
         result = Buffer.from(readFileSync(tempOutput));
         if (result.length < 480000) {
@@ -486,7 +507,11 @@ client.on('message_create', async (msg) => {
                 stickerAuthor: 'My Sticker Bot'
             });
 
-        } catch (error) {
+        } catch (error: any) {
+            if (error instanceof MattingServiceUnavailableError) {
+                await msg.reply('The -borderless flag requires the GPU matting service, which is not running.\n\nThis is the lite build. To enable background removal, restart with:\n  docker compose --profile gpu up --build');
+                return;
+            }
             console.error('Failed to process sticker:', error);
             await msg.reply('Oops, something went wrong while creating your sticker.');
         }
