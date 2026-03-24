@@ -1,14 +1,18 @@
 # Sticker Maker
 
-A WhatsApp bot that turns images and videos into stickers, with GPU-accelerated background removal powered by Meta's SAM 2.1.
+A WhatsApp bot that turns images and videos into stickers, with optional GPU-accelerated background removal powered by Meta's SAM 2.1.
 
 Send `/sticker` with any image or video in WhatsApp and get a sticker back instantly.
+
+Two build modes:
+- **Lite** — just the bot, no GPU needed. Runs on any machine.
+- **Full** — adds the SAM 2.1 GPU matting service for background removal (`-borderless` flag).
 
 ## Features
 
 - **Images → Stickers** — any image becomes a 512x512 WhatsApp sticker
 - **Videos/GIFs → Animated Stickers** — converts video to animated WebP with automatic compression to fit WhatsApp's 500 KB limit
-- **Background Removal** — GPU-powered subject isolation using SAM 2.1 for both images and video (frame-by-frame temporal propagation)
+- **Background Removal** *(full build only)* — GPU-powered subject isolation using SAM 2.1 for both images and video (frame-by-frame temporal propagation)
 - **Text Overlays** — meme-style top/bottom text rendered via Puppeteer with full emoji and Unicode support
 - **Speed Control** — adjust video playback speed from 0.5x to 2x
 - **Reply Support** — reply to any existing image/video with `/sticker` to convert it
@@ -57,9 +61,9 @@ WhatsApp ←→ sticker-bot (Node.js)
 
 ## Prerequisites
 
-- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (for GPU access)
-- An NVIDIA GPU with CUDA support
+- Docker
 - A WhatsApp account to link via QR code
+- *(Full build only)* NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 
 ## Getting Started
 
@@ -70,13 +74,19 @@ WhatsApp ←→ sticker-bot (Node.js)
    cd sticker-maker
    ```
 
-2. **Start both services:**
+2. **Start the bot:**
 
+   **Lite** (no GPU required):
    ```bash
    docker compose up --build
    ```
 
-   The first build will take a while — it downloads the CUDA base image, PyTorch, and the SAM 2.1 checkpoint (~900 MB).
+   **Full** (with GPU background removal):
+   ```bash
+   docker compose --profile gpu up --build
+   ```
+
+   The full build will take a while on first run — it downloads the CUDA base image, PyTorch, and the SAM 2.1 checkpoint (~900 MB).
 
 3. **Scan the QR code** that appears in the terminal with your WhatsApp mobile app (Linked Devices).
 
