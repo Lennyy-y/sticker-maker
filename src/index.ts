@@ -11,6 +11,75 @@ import FormData from 'form-data';
 const execAsync = promisify(exec);
 
 // ============================================================
+// Animated WebP builder — uses sharp-encoded frames (same libwebp
+// that makes static borderless images work) and hand-assembles the
+// RIFF container so every flag is guaranteed correct.
+// ============================================================
+
+function extractWebpBitstream(webpBuf: Buffer): Buffer {
+    let offset = 12; // skip RIFF header
+    const chunks: Buffer[] = [];
+    while (offset + 8 <= webpBuf.length) {
+        const fourCC = webpBuf.toString('ascii', offset, offset + 4);
+        const chunkSize = webpBuf.readUInt32LE(offset + 4);
+        const paddedSize = chunkSize + (chunkSize % 2);
+        if (fourCC === 'VP8 ' || fourCC === 'VP8L' || fourCC === 'ALPH') {
+            chunks.push(webpBuf.subarray(offset, offset + 8 + paddedSize));
+        }
+        offset += 8 + paddedSize;
+    }
+    return Buffer.concat(chunks);
+}
+
+function buildAnimatedWebp(
+    frames: { webpBuf: Buffer; durationMs: number }[],
+    canvasWidth: number,
+    canvasHeight: number,
+): Buffer {
+    // VP8X: Animation(0x02) + Alpha(0x10) = 0x12
+    const vp8xPayload = Buffer.alloc(10);
+    vp8xPayload[0] = 0x12;
+    vp8xPayload.writeUIntLE(canvasWidth - 1, 4, 3);
+    vp8xPayload.writeUIntLE(canvasHeight - 1, 7, 3);
+
+    // ANIM: transparent background, infinite loop
+    const animPayload = Buffer.alloc(6);
+    animPayload.writeUInt32LE(0x00000000, 0);
+    animPayload.writeUInt16LE(0, 4);
+
+    const anmfChunks: Buffer[] = [];
+    for (const frame of frames) {
+        const bitstream = extractWebpBitstream(frame.webpBuf);
+        const anmfDataSize = 16 + bitstream.length;
+        const anmfData = Buffer.alloc(16);
+        anmfData.writeUIntLE(0, 0, 3);                          // x offset
+        anmfData.writeUIntLE(0, 3, 3);                          // y offset
+        anmfData.writeUIntLE(canvasWidth - 1, 6, 3);            // frame width - 1
+        anmfData.writeUIntLE(canvasHeight - 1, 9, 3);           // frame height - 1
+        anmfData.writeUIntLE(frame.durationMs, 12, 3);          // duration
+        anmfData[15] = 0x02; // dispose=0 (none), blend=1 (do not blend / overwrite)
+
+        const anmfHdr = Buffer.alloc(8);
+        anmfHdr.write('ANMF', 0, 4, 'ascii');
+        anmfHdr.writeUInt32LE(anmfDataSize, 4);
+
+        anmfChunks.push(anmfHdr, anmfData, bitstream);
+        if (anmfDataSize % 2 !== 0) anmfChunks.push(Buffer.alloc(1));
+    }
+
+    const vp8xHdr = Buffer.from('VP8X\x0a\x00\x00\x00');
+    const animHdr = Buffer.from('ANIM\x06\x00\x00\x00');
+    const body = Buffer.concat([vp8xHdr, vp8xPayload, animHdr, animPayload, ...anmfChunks]);
+
+    const riffHdr = Buffer.alloc(12);
+    riffHdr.write('RIFF', 0, 4, 'ascii');
+    riffHdr.writeUInt32LE(4 + body.length, 4);
+    riffHdr.write('WEBP', 8, 4, 'ascii');
+
+    return Buffer.concat([riffHdr, body]);
+}
+
+// ============================================================
 // UTILITY: Text rendering helpers
 // ============================================================
 
@@ -160,6 +229,65 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
     const pngFramesDir = path.join('/tmp', `webp_frames_${timestamp}`);
     mkdirSync(pngFramesDir, { recursive: true });
 
+    let result: Buffer = Buffer.from('');
+
+    const compressionProfiles = [
+        { fps: 20, q: 50 },
+        { fps: 15, q: 50 },
+        { fps: 15, q: 30 },
+        { fps: 12, q: 25 },
+        { fps: 10, q: 15 },
+        { fps: 8,  q: 10 },
+        { fps: 8,  q: 0 },
+        { fps: 6,  q: 0 },
+    ];
+
+    // Borderless with pre-matted frames: skip ffmpeg entirely, use sharp
+    // for resize/pad/encode — the exact same pipeline proven for static images.
+    if (opts.borderless && opts.framesDir) {
+        const allFrames = readdirSync(opts.framesDir).filter(f => f.endsWith('.png')).sort();
+        const sourceFps = opts.framesFps || 15;
+
+        for (let i = 0; i < compressionProfiles.length; i++) {
+            const profile = compressionProfiles[i];
+            const frameDurationMs = Math.round(1000 / profile.fps);
+
+            // Select frames to match target fps (uniform sampling)
+            const targetCount = Math.max(1, Math.round(allFrames.length * profile.fps / sourceFps));
+            const selectedFrames: string[] = [];
+            for (let f = 0; f < targetCount; f++) {
+                const srcIdx = Math.min(Math.floor(f * allFrames.length / targetCount), allFrames.length - 1);
+                selectedFrames.push(allFrames[srcIdx]);
+            }
+
+            const sharpFrames: { webpBuf: Buffer; durationMs: number }[] = [];
+            for (const f of selectedFrames) {
+                const pngBuf = readFileSync(path.join(opts.framesDir, f));
+                // Identical to the static image borderless path:
+                // sharp resize + contain + transparent background → WebP with alpha
+                const webpBuf = await sharp(pngBuf)
+                    .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+                    .webp({ quality: profile.q, alphaQuality: 100 })
+                    .toBuffer();
+                sharpFrames.push({ webpBuf, durationMs: frameDurationMs });
+            }
+
+            result = buildAnimatedWebp(sharpFrames, 512, 512);
+
+            if (result.length < 480000) {
+                console.log(`[Compression] Profile ${i + 1} OK: ${(result.length / 1024).toFixed(1)} KB, ${profile.fps}fps, q${profile.q}, ${selectedFrames.length} frames`);
+                break;
+            } else {
+                console.log(`[Compression] Profile ${i + 1} too large: ${(result.length / 1024).toFixed(1)} KB`);
+            }
+        }
+
+        // Cleanup
+        rmSync(opts.framesDir, { recursive: true, force: true });
+        return result;
+    }
+
+    // All other cases: ffmpeg-based pipeline (non-borderless, or raw video input)
     let inputArgs: string[] = [];
     let tempInput: string | null = null;
 
@@ -176,42 +304,21 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
     }
 
     let filterArgs: string[] = [];
-    if (opts.borderless) {
-        filterArgs.push("format=rgba");
-        filterArgs.push("scale=512:512:force_original_aspect_ratio=decrease");
-        filterArgs.push("pad=512:512:-1:-1:color=0x00000000");
-    } else {
-        if (opts.square) filterArgs.push("crop='min(iw,ih)':'min(iw,ih)'");
-        filterArgs.push("scale=512:512:force_original_aspect_ratio=increase");
-        filterArgs.push("crop=512:512");
-    }
+    if (opts.square) filterArgs.push("crop='min(iw,ih)':'min(iw,ih)'");
+    filterArgs.push("scale=512:512:force_original_aspect_ratio=increase");
+    filterArgs.push("crop=512:512");
     if (opts.speed !== 1.0) filterArgs.push(`setpts=${1 / opts.speed}*PTS`);
 
     let filterString = filterArgs.join(',');
-
-    let result: Buffer = Buffer.from('');
-
-    const compressionProfiles = [
-        { fps: 20, q: 50 },
-        { fps: 15, q: 50 },
-        { fps: 15, q: 30 },
-        { fps: 12, q: 25 },
-        { fps: 10, q: 15 },
-        { fps: 8,  q: 10 },
-        { fps: 8,  q: 0 },
-        { fps: 6,  q: 0 },
-    ];
 
     for (let i = 0; i < compressionProfiles.length; i++) {
         const profile = compressionProfiles[i];
         const fpsFilter = `fps=${profile.fps}`;
         const activeFilterStr = filterString ? `${filterString},${fpsFilter}` : fpsFilter;
 
-        // Clear frames from previous attempt
         rmSync(pngFramesDir, { recursive: true, force: true });
         mkdirSync(pngFramesDir, { recursive: true });
 
-        // --- Stage A: ffmpeg → individual PNG frames ---
         let filterFlag = `-vf "${activeFilterStr}"`;
         let mapArg = '';
         if (opts.overlaySrc) {
@@ -224,29 +331,12 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
         const frameFiles = readdirSync(pngFramesDir).filter(f => f.endsWith('.png')).sort();
         if (frameFiles.length === 0) continue;
 
-        // --- Stage B: cwebp + webpmux with explicit dispose/blend flags ---
-        // Each PNG → individual .webp via cwebp, then webpmux assembles with
-        // +dispose_to_background (1) and -b (NO_BLEND) so every frame fully
-        // replaces the canvas. This is what prevents ghosting on WhatsApp Web.
-        const frameDurationMs = Math.round(1000 / profile.fps);
-        const webpFramesDir = path.join(pngFramesDir, 'webps');
-        mkdirSync(webpFramesDir, { recursive: true });
-
-        const cwebpAlphaFlags = opts.borderless ? '-exact -alpha_q 100' : '';
-        for (const f of frameFiles) {
-            const pngPath = path.join(pngFramesDir, f);
-            const webpPath = path.join(webpFramesDir, f.replace('.png', '.webp'));
-            await execAsync(`cwebp -quiet -q ${profile.q} ${cwebpAlphaFlags} "${pngPath}" -o "${webpPath}"`);
-        }
-
-        const muxArgs = frameFiles
-            .map(f => `-frame ${path.join(webpFramesDir, f.replace('.png', '.webp'))} +${frameDurationMs}+0+0+1-b`)
-            .join(' ');
-
-        const bgFlag = opts.borderless ? '-bgcolor 0,0,0,0' : '';
-        await execAsync(`webpmux ${muxArgs} -loop 0 ${bgFlag} -o ${tempOutput}`);
-
+        await execAsync(
+            `ffmpeg -y -framerate ${profile.fps} -i ${pngFramesDir}/frame_%04d.png` +
+            ` -c:v libwebp_anim -lossless 0 -q:v ${profile.q} -loop 0 -an ${tempOutput}`
+        );
         result = Buffer.from(readFileSync(tempOutput));
+
         if (result.length < 480000) {
             console.log(`[Compression] Profile ${i + 1} OK: ${(result.length / 1024).toFixed(1)} KB, ${profile.fps}fps, q${profile.q}, ${frameFiles.length} frames`);
             break;
@@ -276,12 +366,22 @@ interface ImageOptions {
     overlaySrc?: string;
 }
 
-/** Process a static image buffer into a sticker-ready PNG. */
-async function processImage(buffer: Buffer, opts: ImageOptions): Promise<Buffer> {
+/** Process a static image buffer into a sticker-ready image.
+ *  Borderless → WebP with alpha via sharp (guaranteed correct VP8X flags).
+ *  Non-borderless → PNG via ffmpeg for scaling/cropping/overlay. */
+async function processImage(buffer: Buffer, opts: ImageOptions): Promise<{ buffer: Buffer; mimeType: string }> {
+    if (opts.borderless && !opts.overlaySrc) {
+        const webpBuf = await sharp(buffer)
+            .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+            .webp({ quality: 80, alphaQuality: 100 })
+            .toBuffer();
+        return { buffer: webpBuf, mimeType: 'image/webp' };
+    }
+
     const timestamp = Date.now();
     const tempInput = path.join('/tmp', `img_in_${timestamp}.png`);
     const tempOutput = path.join('/tmp', `img_out_${timestamp}.png`);
-    
+
     let resized: Buffer;
     if (opts.borderless) {
         resized = await sharp(buffer).resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).toFormat('png').toBuffer();
@@ -316,15 +416,20 @@ async function processImage(buffer: Buffer, opts: ImageOptions): Promise<Buffer>
     
     if (filterFlag) {
         await execAsync(`ffmpeg -y ${inputArgs.join(' ')} ${filterFlag} "${filterString}" ${mapArg} ${tempOutput}`);
-        const result = Buffer.from(readFileSync(tempOutput));
+        let result = Buffer.from(readFileSync(tempOutput));
         unlinkSync(tempInput);
         unlinkSync(tempOutput);
         if (opts.overlaySrc) try { unlinkSync(opts.overlaySrc); } catch (e) {}
-        return result;
+
+        if (opts.borderless) {
+            const webpBuf = await sharp(result).webp({ quality: 80, alphaQuality: 100 }).toBuffer();
+            return { buffer: webpBuf, mimeType: 'image/webp' };
+        }
+        return { buffer: result, mimeType: 'image/png' };
     }
     
     unlinkSync(tempInput);
-    return resized;
+    return { buffer: resized, mimeType: 'image/png' };
 }
 
 // ============================================================
@@ -486,12 +591,13 @@ client.on('message_create', async (msg) => {
                 finalMimeType = 'image/webp';
             } else if (isStaticImage && (wantsSquare || wantsBorderless || topText || bottomText)) {
                 console.log(`[Pipeline] Stage 2: Image processing`);
-                mediaBuffer = await processImage(mediaBuffer, {
+                const imgResult = await processImage(mediaBuffer, {
                     square: wantsSquare,
                     borderless: wantsBorderless,
                     overlaySrc
                 });
-                finalMimeType = 'image/png';
+                mediaBuffer = imgResult.buffer;
+                finalMimeType = imgResult.mimeType;
             }
 
             // STAGE 3: Send the sticker

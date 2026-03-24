@@ -109,16 +109,24 @@ def analyze_foreground(img_np: np.ndarray):
         fg_x1, fg_y1 = int(fg_xs.max()), int(fg_ys.max())
 
         remaining_bg = []
+        fg_area = foreground.sum()
         for m in bg_candidates:
             seg = m['segmentation']
             ys, xs = np.where(seg)
             cx, cy = int(xs.mean()), int(ys.mean())
 
-            if fg_x0 <= cx <= fg_x1 and fg_y0 <= cy <= fg_y1:
+            # Only rescue if centroid is inside the foreground bbox AND the mask
+            # is smaller than the existing foreground. Large masks (>40% of frame
+            # or bigger than the foreground) are the actual background, not an
+            # interior body part like a shirt or face.
+            area_ratio = m['area'] / total_pixels
+            if (fg_x0 <= cx <= fg_x1 and fg_y0 <= cy <= fg_y1
+                    and area_ratio < 0.4 and m['area'] < fg_area):
                 foreground |= seg
+                fg_area = foreground.sum()
                 if m['area'] > total_pixels * 0.005:
                     fg_points.append([cx, cy])
-                print(f"    [Rescue] Enclosed mask ({m['area']/total_pixels*100:.1f}% area) "
+                print(f"    [Rescue] Enclosed mask ({area_ratio*100:.1f}% area) "
                       f"at ({cx},{cy}) recovered as foreground")
             else:
                 remaining_bg.append(m)
@@ -223,9 +231,11 @@ async def process_image(file: UploadFile = File(...)):
         print("[Image] Running automatic foreground detection...")
         mask, _, _ = analyze_foreground(sam_np)
 
-        # Downscale mask back to original resolution if upscaled
+        # Downscale mask back to original resolution if upscaled.
+        # NEAREST preserves the binary 0/255 mask — LANCZOS would create
+        # semi-transparent edge pixels that show as a halo on WhatsApp Web.
         if scale_factor > 1:
-            mask = np.array(Image.fromarray(mask).resize((orig_w, orig_h), Image.LANCZOS))
+            mask = np.array(Image.fromarray(mask).resize((orig_w, orig_h), Image.NEAREST))
 
         rgba = np.dstack([img_np, mask])
         result = Image.fromarray(rgba, "RGBA")
@@ -357,7 +367,7 @@ async def process_video(file: UploadFile = File(...)):
 
             alpha = (mask.astype(np.uint8) * 255)
             if alpha.shape[0] != h or alpha.shape[1] != w:
-                alpha = np.array(Image.fromarray(alpha).resize((w, h), Image.LANCZOS))
+                alpha = np.array(Image.fromarray(alpha).resize((w, h), Image.NEAREST))
 
             rgba = np.dstack([frame_rgb, alpha])
             pil_frame = Image.fromarray(rgba, "RGBA")
