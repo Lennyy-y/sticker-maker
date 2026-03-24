@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sticker Bot Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        surface: { DEFAULT: '#1a1a2e', light: '#222244', border: '#2a2a4a' },
+                        accent: { DEFAULT: '#00d4aa', dim: '#00a88a' },
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background: #0f0f1a; }
+        .toggle-track { transition: background-color 0.3s; }
+        .toggle-thumb { transition: transform 0.3s; }
+        .pulse { animation: pulse 2s ease-in-out infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="dark min-h-screen text-gray-200 flex items-center justify-center p-4">
+    <div class="w-full max-w-md space-y-4 fade-in">
+
+        <!-- Header -->
+        <div class="text-center mb-6">
+            <h1 class="text-2xl font-bold text-white tracking-tight">Sticker Bot</h1>
+            <p class="text-sm text-gray-500 mt-1">Dashboard</p>
+        </div>
+
+        <!-- Connection Status Card -->
+        <div class="bg-surface rounded-xl border border-surface-border p-5">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">WhatsApp</h2>
+                <div class="flex items-center gap-2">
+                    <div id="statusDot" class="w-2.5 h-2.5 rounded-full bg-gray-500"></div>
+                    <span id="statusText" class="text-sm text-gray-400">Connecting...</span>
+                </div>
+            </div>
+
+            <!-- QR Code Area -->
+            <div id="qrArea" class="hidden">
+                <div class="bg-white rounded-lg p-4 mx-auto w-fit">
+                    <canvas id="qrCanvas"></canvas>
+                </div>
+                <p class="text-center text-xs text-gray-500 mt-3">Scan with WhatsApp to link</p>
+            </div>
+
+            <!-- Connected State -->
+            <div id="connectedArea" class="hidden text-center py-6">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-accent/10 mb-3">
+                    <svg class="w-8 h-8 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                    </svg>
+                </div>
+                <p class="text-white font-medium">Connected</p>
+                <p class="text-xs text-gray-500 mt-1">WhatsApp session is active</p>
+            </div>
+
+            <!-- Initializing State -->
+            <div id="initArea" class="text-center py-6">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-surface-light mb-3">
+                    <svg class="w-8 h-8 text-gray-500 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                </div>
+                <p class="text-gray-400">Starting up...</p>
+            </div>
+
+            <!-- Disconnected State -->
+            <div id="disconnectedArea" class="hidden text-center py-6">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-3">
+                    <svg class="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </div>
+                <p class="text-red-400 font-medium">Disconnected</p>
+                <p class="text-xs text-gray-500 mt-1">Waiting for bot to reconnect...</p>
+            </div>
+
+            <!-- Logout button (only when connected) -->
+            <button id="logoutBtn"
+                class="hidden w-full mt-4 py-2 px-4 rounded-lg text-sm font-medium
+                       bg-surface-light border border-surface-border text-gray-400
+                       hover:text-red-400 hover:border-red-400/30 transition-colors"
+                onclick="doLogout()">
+                Log out / Re-link
+            </button>
+        </div>
+
+        <!-- GPU Service Card -->
+        <div class="bg-surface rounded-xl border border-surface-border p-5">
+            <div class="flex items-center justify-between mb-1">
+                <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Processing Mode</h2>
+            </div>
+            <p class="text-xs text-gray-500 mb-4">GPU mode enables background removal for <code class="text-gray-400">-borderless</code></p>
+
+            <div class="flex items-center justify-between">
+                <div>
+                    <p id="gpuModeLabel" class="text-white font-medium">Lite Mode</p>
+                    <p id="gpuStatusLabel" class="text-xs text-gray-500">GPU service not running</p>
+                </div>
+                <button id="gpuToggle" onclick="toggleGpu()"
+                    class="relative inline-flex h-7 w-12 items-center rounded-full toggle-track bg-gray-600 transition-colors"
+                    role="switch" aria-checked="false">
+                    <span id="gpuThumb" class="toggle-thumb inline-block h-5 w-5 rounded-full bg-white shadow transform translate-x-1"></span>
+                </button>
+            </div>
+
+            <!-- GPU loading indicator -->
+            <div id="gpuLoading" class="hidden mt-3 flex items-center gap-2 text-xs text-gray-400">
+                <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span id="gpuLoadingText">Starting GPU service...</span>
+            </div>
+        </div>
+
+        <!-- Settings Placeholder -->
+        <div class="bg-surface rounded-xl border border-surface-border p-5 opacity-50">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Settings</h2>
+            <p class="text-xs text-gray-500 mt-2">Coming soon</p>
+        </div>
+
+        <p class="text-center text-xs text-gray-600 pt-2">Sticker Bot Dashboard</p>
+    </div>
+
+<script>
+const socket = io();
+
+let currentState = 'initializing';
+let gpuRunning = false;
+let gpuTransitioning = false;
+
+// ---- State management ----
+
+function updateUI(state, qr) {
+    currentState = state;
+    const areas = { qr: 'qrArea', ready: 'connectedArea', initializing: 'initArea', disconnected: 'disconnectedArea' };
+    Object.values(areas).forEach(id => document.getElementById(id).classList.add('hidden'));
+
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+    const logoutBtn = document.getElementById('logoutBtn');
+
+    logoutBtn.classList.add('hidden');
+
+    if (state === 'qr' && qr) {
+        document.getElementById('qrArea').classList.remove('hidden');
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-yellow-400 pulse';
+        text.textContent = 'Scan QR Code';
+        text.className = 'text-sm text-yellow-400';
+        QRCode.toCanvas(document.getElementById('qrCanvas'), qr, {
+            width: 256, margin: 0, color: { dark: '#000000', light: '#ffffff' }
+        });
+    } else if (state === 'ready') {
+        document.getElementById('connectedArea').classList.remove('hidden');
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-accent';
+        text.textContent = 'Connected';
+        text.className = 'text-sm text-accent';
+        logoutBtn.classList.remove('hidden');
+    } else if (state === 'disconnected') {
+        document.getElementById('disconnectedArea').classList.remove('hidden');
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-red-400';
+        text.textContent = 'Disconnected';
+        text.className = 'text-sm text-red-400';
+    } else {
+        document.getElementById('initArea').classList.remove('hidden');
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-gray-500 pulse';
+        text.textContent = 'Starting...';
+        text.className = 'text-sm text-gray-400';
+    }
+}
+
+function updateGpuUI(running) {
+    gpuRunning = running;
+    const toggle = document.getElementById('gpuToggle');
+    const thumb = document.getElementById('gpuThumb');
+    const label = document.getElementById('gpuModeLabel');
+    const status = document.getElementById('gpuStatusLabel');
+
+    if (running) {
+        toggle.classList.remove('bg-gray-600');
+        toggle.classList.add('bg-accent');
+        toggle.setAttribute('aria-checked', 'true');
+        thumb.classList.remove('translate-x-1');
+        thumb.classList.add('translate-x-6');
+        label.textContent = 'Full Mode (GPU)';
+        status.textContent = 'GPU service running';
+        status.className = 'text-xs text-accent';
+    } else {
+        toggle.classList.remove('bg-accent');
+        toggle.classList.add('bg-gray-600');
+        toggle.setAttribute('aria-checked', 'false');
+        thumb.classList.remove('translate-x-6');
+        thumb.classList.add('translate-x-1');
+        label.textContent = 'Lite Mode';
+        status.textContent = 'GPU service not running';
+        status.className = 'text-xs text-gray-500';
+    }
+}
+
+// ---- Socket.IO events ----
+
+socket.on('status', (data) => {
+    updateUI(data.state, data.qr);
+});
+
+socket.on('qr', (qr) => updateUI('qr', qr));
+socket.on('ready', () => updateUI('ready'));
+socket.on('disconnected', () => updateUI('disconnected'));
+socket.on('authenticated', () => {
+    document.getElementById('statusText').textContent = 'Authenticated...';
+});
+
+// ---- API calls ----
+
+async function doLogout() {
+    const btn = document.getElementById('logoutBtn');
+    btn.disabled = true;
+    btn.textContent = 'Logging out...';
+    try {
+        await fetch('/api/logout', { method: 'POST' });
+    } catch (err) {
+        console.error('Logout failed:', err);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Log out / Re-link';
+}
+
+async function toggleGpu() {
+    if (gpuTransitioning) return;
+    gpuTransitioning = true;
+
+    const loading = document.getElementById('gpuLoading');
+    const loadingText = document.getElementById('gpuLoadingText');
+    const toggle = document.getElementById('gpuToggle');
+    toggle.style.opacity = '0.5';
+    toggle.style.pointerEvents = 'none';
+    loading.classList.remove('hidden');
+
+    const action = gpuRunning ? 'stop' : 'start';
+    loadingText.textContent = action === 'start' ? 'Starting GPU service...' : 'Stopping GPU service...';
+
+    try {
+        const res = await fetch(`/api/gpu/${action}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            updateGpuUI(action === 'start');
+        } else {
+            console.error('GPU toggle failed:', data.error);
+        }
+    } catch (err) {
+        console.error('GPU toggle error:', err);
+    }
+
+    loading.classList.add('hidden');
+    toggle.style.opacity = '1';
+    toggle.style.pointerEvents = 'auto';
+    gpuTransitioning = false;
+}
+
+async function pollStatus() {
+    try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        updateUI(data.bot.state, data.bot.qr);
+        updateGpuUI(data.gpu.status === 'running');
+    } catch {}
+}
+
+pollStatus();
+setInterval(pollStatus, 10000);
+</script>
+</body>
+</html>

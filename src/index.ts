@@ -7,6 +7,9 @@ import { writeFileSync, readFileSync, unlinkSync, mkdirSync, readdirSync, rmSync
 import path from 'path';
 import axios from 'axios';
 import FormData from 'form-data';
+import express from 'express';
+import { createServer } from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 
 const execAsync = promisify(exec);
 
@@ -480,13 +483,64 @@ const client = new Client({
     }
 });
 
+// ============================================================
+// INTERNAL EVENT SERVER (port 3001, Docker-internal only)
+// ============================================================
+
+const app = express();
+const httpServer = createServer(app);
+const io = new SocketIOServer(httpServer, { cors: { origin: '*' } });
+
+let botState: 'initializing' | 'qr' | 'ready' | 'disconnected' = 'initializing';
+let lastQr: string | null = null;
+
+app.use(express.json());
+
+app.get('/status', (_req, res) => {
+    res.json({ state: botState, ...(botState === 'qr' && lastQr ? { qr: lastQr } : {}) });
+});
+
+app.post('/logout', async (_req, res) => {
+    try {
+        await client.logout();
+        botState = 'disconnected';
+        lastQr = null;
+        io.emit('disconnected');
+        res.json({ success: true });
+    } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+httpServer.listen(3001, () => {
+    console.log('[EventServer] Listening on port 3001 (internal)');
+});
+
 client.on('qr', (qr) => {
     console.log('Scan this QR code in WhatsApp to log in:');
     qrcode.generate(qr, { small: true });
+    botState = 'qr';
+    lastQr = qr;
+    io.emit('qr', qr);
+});
+
+client.on('authenticated', () => {
+    console.log('WhatsApp authenticated.');
+    io.emit('authenticated');
 });
 
 client.on('ready', () => {
     console.log('Sticker Bot is ready and connected!');
+    botState = 'ready';
+    lastQr = null;
+    io.emit('ready');
+});
+
+client.on('disconnected', (reason) => {
+    console.log('WhatsApp disconnected:', reason);
+    botState = 'disconnected';
+    lastQr = null;
+    io.emit('disconnected', reason);
 });
 
 // ============================================================
@@ -653,6 +707,7 @@ client.initialize();
 
 const gracefulShutdown = async () => {
     console.log('\nShutting down gracefully...');
+    httpServer.close();
     try {
         await client.destroy();
         console.log('WhatsApp connection closed natively. Session saved.');

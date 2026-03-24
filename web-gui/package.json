@@ -1,0 +1,11 @@
+{
+  "name": "sticker-maker-gui",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "dockerode": "^4.0.4",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  }
+}
