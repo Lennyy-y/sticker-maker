@@ -128,11 +128,13 @@ interface VideoOptions {
 
 /** Process any video buffer (raw MP4 or matted PNG frames) into a final animated WebP sticker.
  *
- *  Two-stage pipeline that avoids libwebp_anim's delta compression (which
- *  causes datamoshing on WhatsApp Web):
+ *  Two-stage pipeline with explicit frame control for WhatsApp Web compatibility:
  *    Stage A — ffmpeg extracts filtered/scaled PNG frames
- *    Stage B — img2webp assembles them into animated WebP where every
- *              frame is an independent keyframe (no inter-frame deltas) */
+ *    Stage B — cwebp encodes each frame individually, then webpmux assembles
+ *              them with dispose=BACKGROUND + blend=NO_BLEND per frame.
+ *              This forces every frame to fully replace the canvas, preventing
+ *              the delta/ghosting artifacts WhatsApp Web's renderer produces
+ *              when frames use the default BLEND + NO_DISPOSE flags. */
 async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<Buffer> {
     const timestamp = Date.now();
     const tempOutput = path.join('/tmp', `vid_out_${timestamp}.webp`);
@@ -187,7 +189,8 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
         const activeFilterStr = filterString ? `${filterString},${fpsFilter}` : fpsFilter;
 
         // Clear frames from previous attempt
-        for (const f of readdirSync(pngFramesDir)) unlinkSync(path.join(pngFramesDir, f));
+        rmSync(pngFramesDir, { recursive: true, force: true });
+        mkdirSync(pngFramesDir, { recursive: true });
 
         // --- Stage A: ffmpeg → individual PNG frames ---
         let filterFlag = `-vf "${activeFilterStr}"`;
@@ -202,13 +205,25 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
         const frameFiles = readdirSync(pngFramesDir).filter(f => f.endsWith('.png')).sort();
         if (frameFiles.length === 0) continue;
 
-        // --- Stage B: img2webp assembles animated WebP (all keyframes, no deltas) ---
+        // --- Stage B: cwebp + webpmux with explicit dispose/blend flags ---
+        // Each PNG → individual .webp via cwebp, then webpmux assembles with
+        // +dispose_to_background (1) and -b (NO_BLEND) so every frame fully
+        // replaces the canvas. This is what prevents ghosting on WhatsApp Web.
         const frameDurationMs = Math.round(1000 / profile.fps);
-        const frameArgs = frameFiles
-            .map(f => `-d ${frameDurationMs} -lossy -q ${profile.q} ${path.join(pngFramesDir, f)}`)
+        const webpFramesDir = path.join(pngFramesDir, 'webps');
+        mkdirSync(webpFramesDir, { recursive: true });
+
+        for (const f of frameFiles) {
+            const pngPath = path.join(pngFramesDir, f);
+            const webpPath = path.join(webpFramesDir, f.replace('.png', '.webp'));
+            await execAsync(`cwebp -quiet -lossy -q ${profile.q} "${pngPath}" -o "${webpPath}"`);
+        }
+
+        const muxArgs = frameFiles
+            .map(f => `-frame ${path.join(webpFramesDir, f.replace('.png', '.webp'))} +${frameDurationMs}+0+0+1-b`)
             .join(' ');
 
-        await execAsync(`img2webp -loop 0 -m 4 ${frameArgs} -o ${tempOutput}`);
+        await execAsync(`webpmux ${muxArgs} -loop 0 -o ${tempOutput}`);
 
         result = Buffer.from(readFileSync(tempOutput));
         if (result.length < 480000) {
