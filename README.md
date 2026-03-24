@@ -89,14 +89,3 @@ The `sticker-bot` service bind-mounts `./src` into the container for live reload
 ```bash
 docker compose restart sticker-bot
 ```
-
-### Branches
-
-| Branch | Purpose |
-|---|---|
-| `prod` | Stable, production-ready code |
-| `beta` | Active development — make changes here |
-
-## License
-
-ISC
