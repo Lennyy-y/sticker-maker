@@ -16,6 +16,11 @@ if [ -f "$PID_FILE" ]; then
     exit 1
 fi
 
+if [ ! -d "$REPO_ROOT/node_modules" ]; then
+    echo "Error: node_modules not found. Run ./scripts/setup-mac.sh first."
+    exit 1
+fi
+
 mkdir -p "$LOG_DIR"
 > "$PID_FILE"
 
@@ -25,6 +30,12 @@ echo "=== Starting Sticker Maker (native) ==="
 if [ "$LITE" = false ]; then
     if [ ! -d "$VENV_DIR" ]; then
         echo "Error: Python venv not found. Run ./scripts/setup-mac.sh first."
+        exit 1
+    fi
+    CKPT="$REPO_ROOT/matting-service/checkpoints/sam2.1_hiera_large.pt"
+    if [ ! -f "$CKPT" ]; then
+        echo "Error: SAM2 checkpoint not found at $CKPT"
+        echo "Run ./scripts/setup-mac.sh to download it."
         exit 1
     fi
     echo "[1/3] Starting matting service..."
@@ -45,7 +56,7 @@ echo "[2/3] Starting sticker bot..."
     cd "$REPO_ROOT"
     MATTING_API_URL="http://localhost:8000" \
     DATA_DIR="$REPO_ROOT/data" \
-    exec npx ts-node src/index.ts
+    exec ./node_modules/.bin/ts-node src/index.ts
 ) > "$LOG_DIR/bot.log" 2>&1 &
 echo "$!" >> "$PID_FILE"
 echo "  PID $! — sticker bot on port 3001"
