@@ -171,6 +171,17 @@
             </div>
         </div>
 
+        <!-- Request History Card -->
+        <div class="bg-surface rounded-xl border border-surface-border p-5">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Request History</h2>
+                <span id="historyCount" class="text-xs text-gray-500 bg-surface-light px-2 py-0.5 rounded-full">0</span>
+            </div>
+            <div id="historyList" class="space-y-2 max-h-[300px] overflow-y-auto">
+                <p id="historyEmpty" class="text-center text-xs text-gray-500 py-4">No requests yet</p>
+            </div>
+        </div>
+
         <!-- Picker Modal (hidden by default) -->
         <div id="pickerOverlay" class="hidden fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4" onclick="closePicker(event)">
             <div class="bg-surface border border-surface-border rounded-xl w-full max-w-md max-h-[80vh] flex flex-col" onclick="event.stopPropagation()">
@@ -292,6 +303,17 @@ socket.on('authenticated', () => {
     document.getElementById('statusText').textContent = 'Authenticated...';
 });
 
+socket.on('request', (data) => {
+    requestHistory.unshift(data);
+    if (requestHistory.length > 50) requestHistory.pop();
+    renderHistory();
+});
+
+socket.on('request:update', (data) => {
+    const entry = requestHistory.find(r => r.id === data.id);
+    if (entry) { entry.status = data.status; renderHistory(); }
+});
+
 // ---- API calls ----
 
 async function doLogout() {
@@ -355,9 +377,10 @@ async function boot() {
     const overlay = document.getElementById('bootOverlay');
     while (true) {
         try {
-            const [statusRes, wlRes] = await Promise.all([
+            const [statusRes, wlRes, histRes] = await Promise.all([
                 fetch('/api/status'),
-                fetch('/api/whitelist')
+                fetch('/api/whitelist'),
+                fetch('/api/history')
             ]);
             if (!statusRes.ok || !wlRes.ok) throw new Error('not ready');
 
@@ -369,6 +392,11 @@ async function boot() {
             wlEnabled = wlData.enabled;
             wlEntries = wlData.entries || [];
             updateWlUI();
+
+            if (histRes.ok) {
+                requestHistory = await histRes.json();
+                renderHistory();
+            }
 
             dashboardReady = true;
             overlay.classList.add('hidden');
@@ -563,6 +591,75 @@ function renderPickerList() {
         </button>`;
     }).join('');
 }
+
+// ---- Request History ----
+
+let requestHistory = [];
+
+function timeAgo(ts) {
+    const sec = Math.floor((Date.now() - ts) / 1000);
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + 'm ago';
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return hr + 'h ago';
+    return Math.floor(hr / 24) + 'd ago';
+}
+
+function statusIcon(status) {
+    if (status === 'queued') return `<svg class="w-4 h-4 text-gray-400 animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>`;
+    if (status === 'processing') return `<svg class="w-4 h-4 text-yellow-400 animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>`;
+    if (status === 'done') return `<svg class="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>`;
+    return `<svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>`;
+}
+
+function mediaIcon(type) {
+    if (type === 'video') return `<svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`;
+    return `<svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>`;
+}
+
+function renderHistory() {
+    const list = document.getElementById('historyList');
+    const empty = document.getElementById('historyEmpty');
+    const count = document.getElementById('historyCount');
+
+    count.textContent = requestHistory.length;
+
+    if (requestHistory.length === 0) {
+        empty.classList.remove('hidden');
+        list.querySelectorAll('.history-entry').forEach(e => e.remove());
+        return;
+    }
+    empty.classList.add('hidden');
+
+    list.innerHTML = requestHistory.map(r => `
+        <div class="history-entry flex items-center gap-3 px-3 py-2.5 rounded-lg bg-surface-light/50" data-id="${r.id}">
+            <div class="flex-shrink-0">${statusIcon(r.status)}</div>
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-1.5">
+                    ${mediaIcon(r.mediaType)}
+                    <p class="text-sm text-white truncate">${escHtml(r.chatName)}</p>
+                </div>
+                <p class="text-xs text-gray-500 truncate mt-0.5">${escHtml(r.flags)}</p>
+            </div>
+            <div class="flex-shrink-0 text-right">
+                <span class="text-xs ${r.status === 'done' ? 'text-accent' : r.status === 'error' ? 'text-red-400' : 'text-gray-500'}">${r.status}</span>
+                <p class="text-xs text-gray-600 mt-0.5">${timeAgo(r.timestamp)}</p>
+            </div>
+        </div>
+    `).join('');
+}
+
+setInterval(() => { if (requestHistory.length > 0) renderHistory(); }, 30000);
 
 </script>
 </body>
