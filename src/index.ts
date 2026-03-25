@@ -3,7 +3,7 @@ import qrcode from 'qrcode-terminal';
 import sharp from 'sharp';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, readFileSync, unlinkSync, mkdirSync, readdirSync, rmSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, mkdirSync, readdirSync, rmSync, existsSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import axios from 'axios';
@@ -160,6 +160,27 @@ function buildAnimatedWebp(
 // UTILITY: Text rendering helpers
 // ============================================================
 
+function resolveAntonFontPath(): string {
+    const envPath = process.env.STICKER_FONT_PATH;
+    if (envPath) {
+        const resolved = path.resolve(envPath);
+        if (existsSync(resolved)) return resolved;
+        console.warn(`[Text overlay] STICKER_FONT_PATH not found: ${resolved}`);
+    }
+    const candidates = [
+        path.join(__dirname, '..', 'fonts', 'Anton-Regular.ttf'),
+        path.join(__dirname, '..', 'Anton-Regular.ttf'),
+        '/usr/src/app/fonts/Anton-Regular.ttf',
+        '/usr/src/app/Anton-Regular.ttf',
+    ];
+    for (const p of candidates) {
+        if (existsSync(p)) return p;
+    }
+    throw new Error(
+        'Anton-Regular.ttf not found. Run ./scripts/setup-mac.sh (macOS), rebuild the Docker image, or set STICKER_FONT_PATH.',
+    );
+}
+
 /** Uses Puppeteer to render a 512x512 transparent PNG containing the top and bottom text.
  *  This naturally supports emojis, complex text wrapping, and non-latin text perfectly. */
 async function buildTextOverlayImage(browser: any, topText: string, bottomText: string, timestamp: number): Promise<string> {
@@ -167,7 +188,7 @@ async function buildTextOverlayImage(browser: any, topText: string, bottomText: 
     const safeTop = topText.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
     const safeBottom = bottomText.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
     
-    const fontObj = readFileSync('/usr/src/app/Anton-Regular.ttf');
+    const fontObj = readFileSync(resolveAntonFontPath());
     const b64 = fontObj.toString('base64');
 
     const html = `
@@ -202,7 +223,7 @@ async function buildTextOverlayImage(browser: any, topText: string, bottomText: 
     await page.setContent(html, { waitUntil: 'load' });
     await page.evaluate(`(async () => { await document.fonts.ready; })()`);
 
-    const outPath = `/tmp/text_overlay_${timestamp}.png`;
+    const outPath = path.join(os.tmpdir(), `text_overlay_${timestamp}.png`);
     await page.screenshot({ path: outPath, omitBackground: true });
     await page.close();
     return outPath;

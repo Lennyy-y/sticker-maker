@@ -2,9 +2,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PID_FILE="$REPO_ROOT/scripts/.pids"
+# Keep PID + logs outside the repo so `git pull` never conflicts with running services.
+RUNTIME_DIR="${STICKER_RUNTIME_DIR:-${HOME}/.sticker-maker/run}"
+PID_FILE="$RUNTIME_DIR/pids"
+LOG_DIR="$RUNTIME_DIR/logs"
 VENV_DIR="$REPO_ROOT/matting-service/.venv"
-LOG_DIR="$REPO_ROOT/scripts/.logs"
 
 # Prefer node@18 from Homebrew if available
 NODE18_BIN="$(brew --prefix node@18 2>/dev/null)/bin"
@@ -27,7 +29,7 @@ if [ ! -d "$REPO_ROOT/node_modules" ]; then
     exit 1
 fi
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$RUNTIME_DIR"
 > "$PID_FILE"
 
 echo "=== Starting Sticker Maker (native) ==="

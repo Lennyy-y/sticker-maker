@@ -151,6 +151,8 @@ Docker on macOS cannot pass Metal GPU access to containers, so the native path r
 | `DATA_DIR` | `./data` (relative to project root) | Directory for persistent settings (whitelist). Set to `/usr/src/app/data` in Docker. |
 | `SAM2_CHECKPOINT` | `./checkpoints/sam2.1_hiera_large.pt` | Path to SAM 2.1 checkpoint. Set to `/app/checkpoints/...` in Docker. |
 | `NATIVE_MODE` | `0` | Set to `1` by start scripts on macOS. Disables Docker-based GPU toggle in the dashboard. |
+| `STICKER_RUNTIME_DIR` | `~/.sticker-maker/run` | Native `start.sh` / `stop.sh` only: PID file and logs live here so the repo stays clean for `git pull`. |
+| `STICKER_FONT_PATH` | _(unset)_ | Optional path to `Anton-Regular.ttf` for `-tt` / `-bt` overlays. Default: `fonts/Anton-Regular.ttf` next to the project (downloaded by `setup-mac.sh` / Docker build). |
 
 Whitelist settings are persisted to `DATA_DIR/whitelist.json` and survive container restarts (backed by the `bot-data` Docker volume).
 

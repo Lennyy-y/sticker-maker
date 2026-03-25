@@ -22,6 +22,11 @@ RUN npm install
 # Copy the rest of your application code
 COPY . .
 
+# Anton — same path as native (`fonts/Anton-Regular.ttf`); OFL license
+RUN mkdir -p fonts \
+    && wget -q -O fonts/Anton-Regular.ttf \
+        https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf
+
 # Compile TypeScript to JavaScript
 RUN npm run build
 

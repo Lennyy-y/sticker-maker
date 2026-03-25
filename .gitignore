@@ -38,5 +38,8 @@ test_text_overlay.png
 # Native macOS setup artifacts
 matting-service/.venv/
 matting-service/checkpoints/
+# Downloaded by setup-mac.sh / Docker build (SIL OFL)
+fonts/Anton-Regular.ttf
+# Legacy native PID/logs (state now defaults to ~/.sticker-maker/run)
 scripts/.pids
 scripts/.logs/

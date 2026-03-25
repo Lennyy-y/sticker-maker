@@ -2,11 +2,18 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PID_FILE="$REPO_ROOT/scripts/.pids"
+RUNTIME_DIR="${STICKER_RUNTIME_DIR:-${HOME}/.sticker-maker/run}"
+PID_FILE="$RUNTIME_DIR/pids"
 
 if [ ! -f "$PID_FILE" ]; then
-    echo "No running services found (no PID file)."
-    exit 0
+    # Legacy location (before run state moved out of the repo)
+    LEGACY_PID="$REPO_ROOT/scripts/.pids"
+    if [ -f "$LEGACY_PID" ]; then
+        PID_FILE="$LEGACY_PID"
+    else
+        echo "No running services found (no PID file)."
+        exit 0
+    fi
 fi
 
 echo "=== Stopping Sticker Maker ==="

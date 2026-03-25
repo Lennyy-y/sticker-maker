@@ -46,6 +46,15 @@ pip install --quiet -r "$REPO_ROOT/matting-service/requirements.txt"
 
 deactivate
 
+# ---- Anton font (Puppeteer text overlays: -tt / -bt) ----
+FONT_DIR="$REPO_ROOT/fonts"
+FONT_FILE="$FONT_DIR/Anton-Regular.ttf"
+mkdir -p "$FONT_DIR"
+if [ ! -f "$FONT_FILE" ]; then
+    echo "  Downloading Anton font (SIL OFL) for text overlays..."
+    curl -fsSL -o "$FONT_FILE" "https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf"
+fi
+
 # ---- Node.js dependencies ----
 echo "[4/6] Installing Node.js dependencies (bot)..."
 cd "$REPO_ROOT"
