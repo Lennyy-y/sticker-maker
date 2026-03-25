@@ -6,6 +6,12 @@ PID_FILE="$REPO_ROOT/scripts/.pids"
 VENV_DIR="$REPO_ROOT/matting-service/.venv"
 LOG_DIR="$REPO_ROOT/scripts/.logs"
 
+# Prefer node@18 from Homebrew if available
+NODE18_BIN="$(brew --prefix node@18 2>/dev/null)/bin"
+if [ -d "$NODE18_BIN" ]; then
+    export PATH="$NODE18_BIN:$PATH"
+fi
+
 LITE=false
 if [[ "${1:-}" == "--lite" ]]; then
     LITE=true

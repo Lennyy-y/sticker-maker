@@ -19,8 +19,14 @@ else
 fi
 
 # ---- System dependencies ----
-echo "[2/6] Installing system dependencies (python, node, ffmpeg)..."
-brew install python node ffmpeg 2>/dev/null || true
+echo "[2/6] Installing system dependencies (python, node@18, ffmpeg)..."
+brew install python node@18 ffmpeg 2>/dev/null || true
+
+# Ensure node@18 is on PATH (brew doesn't link keg-only formulae by default)
+NODE18_BIN="$(brew --prefix node@18)/bin"
+if [ -d "$NODE18_BIN" ]; then
+    export PATH="$NODE18_BIN:$PATH"
+fi
 
 # ---- Python venv + pip deps ----
 echo "[3/6] Setting up Python virtual environment..."
@@ -43,11 +49,11 @@ deactivate
 # ---- Node.js dependencies ----
 echo "[4/6] Installing Node.js dependencies (bot)..."
 cd "$REPO_ROOT"
-npm install --silent
+npm install
 
 echo "[5/6] Installing Node.js dependencies (web-gui)..."
 cd "$REPO_ROOT/web-gui"
-npm install --silent
+npm install
 
 # ---- SAM2 checkpoint ----
 echo "[6/6] Checking SAM 2.1 checkpoint (~900 MB)..."
