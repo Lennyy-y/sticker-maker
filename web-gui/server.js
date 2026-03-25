@@ -128,6 +128,56 @@ app.post('/api/logout', async (_req, res) => {
     }
 });
 
+// --------------- Whitelist proxy routes ---------------
+
+app.get('/api/whitelist', async (_req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/whitelist`);
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+app.put('/api/whitelist/enabled', async (req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/whitelist/enabled`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body)
+        });
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+app.post('/api/whitelist/entry', async (req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/whitelist/entry`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body)
+        });
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+app.delete('/api/whitelist/entry/:chatId', async (req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/whitelist/entry/${encodeURIComponent(req.params.chatId)}`, { method: 'DELETE' });
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+app.get('/api/contacts', async (_req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/contacts`);
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+app.get('/api/groups', async (_req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/groups`);
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
 // --------------- Socket.IO: send current state to new browsers ---------------
 
 io.on('connection', (socket) => {

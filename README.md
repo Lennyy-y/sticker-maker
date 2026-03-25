@@ -16,7 +16,8 @@ Two build modes:
 - **Text Overlays** — meme-style top/bottom text rendered via Puppeteer with full emoji and Unicode support
 - **Speed Control** — adjust video playback speed from 0.5x to 2x
 - **Reply Support** — reply to any existing image/video with `/sticker` to convert it
-- **Web Dashboard** — browser-based control panel for QR code scanning, connection status, and GPU mode toggling
+- **Whitelist** — restrict the bot to specific contacts or groups via the dashboard (O(1) lookup, persisted to disk)
+- **Web Dashboard** — browser-based control panel for QR code scanning, connection status, GPU mode toggling, and whitelist management
 
 ## Usage
 
@@ -45,18 +46,20 @@ The project runs as three Docker containers:
 
 | Service | Description |
 |---|---|
-| **sticker-bot** | Node.js/TypeScript WhatsApp client using `whatsapp-web.js` + Puppeteer. Handles message parsing, media download, text overlay rendering, video encoding, and sticker delivery. Exposes an internal event server on port 3001 for the dashboard. |
-| **web-gui** | Node.js Express dashboard served on port 3000. Bridges bot events (QR code, connection status) to the browser via Socket.IO, and controls Docker services (GPU toggle) via the mounted Docker socket. |
+| **sticker-bot** | Node.js/TypeScript WhatsApp client using `whatsapp-web.js` + Puppeteer. Handles message parsing, media download, text overlay rendering, video encoding, sticker delivery, and whitelist filtering. Exposes an internal API + Socket.IO server on port 3001 for the dashboard. |
+| **web-gui** | Node.js Express dashboard served on port 3000. Bridges bot events (QR code, connection status) to the browser via Socket.IO, controls Docker services (GPU toggle) via the mounted Docker socket, and provides a UI for whitelist management. |
 | **video-matting** | Python FastAPI service running SAM 2.1 (hiera_large) on GPU. Provides `/process-image` and `/process` endpoints for background removal on static images and video frame sequences. Only runs when GPU profile is active. |
 
 ```
 Browser ←→ web-gui (:3000)
                 │
                 ├── Socket.IO → sticker-bot (:3001 internal)
+                ├── REST API → sticker-bot (whitelist CRUD, contacts/groups)
                 └── Docker socket → service control
 
 WhatsApp ←→ sticker-bot (Node.js)
                  │
+                 ├── Whitelist filter (O(1) Set lookup)
                  ├── Sharp (image/video frame encoding + WebP assembly)
                  ├── FFmpeg (video frame extraction + filtering)
                  ├── Puppeteer (text overlay rendering)
@@ -99,6 +102,15 @@ WhatsApp ←→ sticker-bot (Node.js)
 
 4. **Send `/sticker`** with an image or video in any chat.
 
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `MATTING_API_URL` | `http://video-matting:8000` | URL of the matting service (set automatically in Docker) |
+| `DATA_DIR` | `./data` (relative to project root) | Directory for persistent settings (whitelist). Set to `/usr/src/app/data` in Docker. |
+
+Whitelist settings are persisted to `DATA_DIR/whitelist.json` and survive container restarts (backed by the `bot-data` Docker volume).
+
 ## Remote Deployment
 
 The entire stack can run on a remote server (e.g., an EC2 instance). Just open port 3000 in your firewall/security group and access the dashboard from any browser at `http://<server-ip>:3000`. All inter-service communication stays within the Docker network.
@@ -115,4 +127,13 @@ The `web-gui` service can be rebuilt independently:
 
 ```bash
 docker compose up -d --build web-gui
+```
+
+### Running without Docker
+
+The bot can run directly on a host machine with Node.js 18+, FFmpeg, and Chromium installed. Settings are stored in `./data/` by default (gitignored). The matting service is optional — without it, the `-borderless` flag is unavailable.
+
+```bash
+npm install
+npx ts-node src/index.ts
 ```

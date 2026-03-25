@@ -14,10 +14,12 @@ services:
       - "3001"
     volumes:
       - wa-session-data:/usr/src/app/.wwebjs_auth
+      - bot-data:/usr/src/app/data
       - ./src:/usr/src/app/src
     environment:
       - NODE_ENV=development
       - MATTING_API_URL=http://video-matting:8000
+      - DATA_DIR=/usr/src/app/data
     command: ["sh", "-c", "find /usr/src/app/.wwebjs_auth -name 'SingletonLock' -delete 2>/dev/null; exec ./node_modules/.bin/ts-node src/index.ts"]
 
   # --- Web Dashboard ---
@@ -67,3 +69,4 @@ services:
 
 volumes:
   wa-session-data:
+  bot-data:
