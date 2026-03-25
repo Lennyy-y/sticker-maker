@@ -8,6 +8,20 @@ const path = require('path');
 const NATIVE_MODE = process.env.NATIVE_MODE === '1';
 const MATTING_URL = process.env.MATTING_URL || 'http://localhost:8000';
 
+/** Prefer IPv4 loopback for health checks — Node may resolve `localhost` to ::1 while the
+ *  matting service only listens on IPv4, which falsely reports the service as down. */
+function mattingHealthCheckUrl() {
+    try {
+        const u = new URL(MATTING_URL);
+        if (u.hostname === 'localhost') u.hostname = '127.0.0.1';
+        u.pathname = '/openapi.json';
+        u.search = '';
+        return u.toString();
+    } catch {
+        return 'http://127.0.0.1:8000/openapi.json';
+    }
+}
+
 let docker = null;
 if (!NATIVE_MODE) {
     try {
@@ -30,6 +44,20 @@ app.use(express.static(path.join(__dirname, 'public')));
 let botState = 'initializing';
 let lastQr = null;
 
+async function refreshBotStateFromHttp() {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/status`, { signal: AbortSignal.timeout(8000) });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data && typeof data.state === 'string') {
+            botState = data.state;
+            lastQr = data.qr != null ? data.qr : null;
+        }
+    } catch {
+        /* keep cached bridge state */
+    }
+}
+
 // --------------- Bot bridge via Socket.IO client ---------------
 
 let botSocket = null;
@@ -44,9 +72,16 @@ function connectToBot() {
             const res = await fetch(`${BOT_WS_URL}/status`);
             const data = await res.json();
             botState = data.state;
-            lastQr = data.qr || null;
-            io.emit('status', { state: botState, qr: lastQr });
+            lastQr = data.qr != null ? data.qr : null;
+            io.emit('status', { state: botState, qr: botState === 'qr' ? lastQr : null });
         } catch {}
+    });
+
+    botSocket.on('status', (payload) => {
+        if (!payload || typeof payload.state !== 'string') return;
+        botState = payload.state;
+        lastQr = payload.qr != null ? payload.qr : null;
+        io.emit('status', { state: botState, qr: botState === 'qr' ? lastQr : null });
     });
 
     botSocket.on('qr', (qr) => {
@@ -64,14 +99,14 @@ function connectToBot() {
         botState = 'ready';
         lastQr = null;
         io.emit('ready');
-        io.emit('status', { state: 'ready' });
+        io.emit('status', { state: 'ready', qr: null });
     });
 
     botSocket.on('disconnected', (reason) => {
         botState = 'disconnected';
         lastQr = null;
         io.emit('disconnected', reason);
-        io.emit('status', { state: 'disconnected' });
+        io.emit('status', { state: 'disconnected', qr: null });
     });
 
     botSocket.on('request', (data) => {
@@ -92,6 +127,8 @@ connectToBot();
 // --------------- REST API ---------------
 
 app.get('/api/status', async (_req, res) => {
+    await refreshBotStateFromHttp();
+
     let gpuStatus = 'not_created';
 
     if (docker) {
@@ -102,13 +139,18 @@ app.get('/api/status', async (_req, res) => {
         } catch {}
     } else {
         try {
-            const r = await fetch(`${MATTING_URL}/docs`, { signal: AbortSignal.timeout(2000) });
+            const r = await fetch(mattingHealthCheckUrl(), { signal: AbortSignal.timeout(8000) });
             gpuStatus = r.ok ? 'running' : 'stopped';
-        } catch { gpuStatus = 'not_running'; }
+        } catch {
+            gpuStatus = 'not_running';
+        }
     }
 
     res.json({
-        bot: { state: botState, qr: botState === 'qr' ? lastQr : undefined },
+        bot: {
+            state: botState,
+            qr: botState === 'qr' ? lastQr : null,
+        },
         gpu: { status: gpuStatus },
         nativeMode: NATIVE_MODE,
     });
@@ -220,8 +262,12 @@ app.get('/api/history', async (_req, res) => {
 
 // --------------- Socket.IO: send current state to new browsers ---------------
 
-io.on('connection', (socket) => {
-    socket.emit('status', { state: botState, qr: botState === 'qr' ? lastQr : undefined });
+io.on('connection', async (socket) => {
+    await refreshBotStateFromHttp();
+    socket.emit('status', {
+        state: botState,
+        qr: botState === 'qr' ? lastQr : null,
+    });
 });
 
 // --------------- Start ---------------

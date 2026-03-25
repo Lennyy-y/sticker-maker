@@ -74,7 +74,7 @@ fi
 echo "[2/3] Starting sticker bot..."
 (
     cd "$REPO_ROOT"
-    MATTING_API_URL="http://localhost:8000" \
+    MATTING_API_URL="http://127.0.0.1:8000" \
     DATA_DIR="$REPO_ROOT/data" \
     PUPPETEER_EXECUTABLE_PATH="$CHROME_PATH" \
     exec ./node_modules/.bin/ts-node src/index.ts
@@ -87,7 +87,7 @@ echo "[3/3] Starting web dashboard..."
 (
     cd "$REPO_ROOT/web-gui"
     BOT_WS_URL="http://localhost:3001" \
-    MATTING_URL="http://localhost:8000" \
+    MATTING_URL="http://127.0.0.1:8000" \
     NATIVE_MODE=1 \
     exec node server.js
 ) > "$LOG_DIR/gui.log" 2>&1 &

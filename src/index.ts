@@ -221,7 +221,11 @@ class MattingServiceUnavailableError extends Error {
 
 function isMattingConnectionError(err: any): boolean {
     const code = err?.code || err?.cause?.code;
-    return code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ERR_BAD_REQUEST';
+    if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT' || code === 'ECONNABORTED')
+        return true;
+    const msg = String(err?.message || '');
+    if (msg.includes('timeout') && msg.includes('exceeded')) return true;
+    return false;
 }
 
 /** Remove background from a static image using the SAM2 GPU service */
@@ -247,16 +251,21 @@ async function removeBackgroundFromImage(buffer: Buffer): Promise<Buffer> {
 /** Remove background from a video using the Python GPU matting service.
  *  Returns a directory of RGBA PNG frames + fps metadata.
  *  PNG frames natively preserve alpha — VP9 WebM silently strips it. */
-async function removeBackgroundFromVideo(buffer: Buffer): Promise<{framesDir: string, fps: number}> {
+async function removeBackgroundFromVideo(
+    buffer: Buffer,
+    kind: 'mp4' | 'gif' = 'mp4',
+): Promise<{framesDir: string, fps: number}> {
     const form = new FormData();
-    form.append('file', buffer, { filename: 'input.mp4', contentType: 'video/mp4' });
+    const filename = kind === 'gif' ? 'input.gif' : 'input.mp4';
+    const contentType = kind === 'gif' ? 'image/gif' : 'video/mp4';
+    form.append('file', buffer, { filename, contentType });
 
     let response;
     try {
         response = await axios.post(`${MATTING_URL}/process`, form, {
             headers: form.getHeaders(),
             responseType: 'arraybuffer',
-            timeout: 120000
+            timeout: 900000,
         });
     } catch (err: any) {
         if (isMattingConnectionError(err)) throw new MattingServiceUnavailableError();
@@ -570,7 +579,10 @@ let lastQr: string | null = null;
 app.use(express.json());
 
 app.get('/status', (_req, res) => {
-    res.json({ state: botState, ...(botState === 'qr' && lastQr ? { qr: lastQr } : {}) });
+    res.json({
+        state: botState,
+        qr: botState === 'qr' ? lastQr : null,
+    });
 });
 
 app.post('/logout', async (_req, res) => {
@@ -662,6 +674,7 @@ client.on('qr', (qr) => {
     botState = 'qr';
     lastQr = qr;
     io.emit('qr', qr);
+    io.emit('status', { state: 'qr', qr });
 });
 
 client.on('authenticated', () => {
@@ -674,6 +687,7 @@ client.on('ready', () => {
     botState = 'ready';
     lastQr = null;
     io.emit('ready');
+    io.emit('status', { state: 'ready', qr: null });
 });
 
 client.on('disconnected', (reason) => {
@@ -681,6 +695,7 @@ client.on('disconnected', (reason) => {
     botState = 'disconnected';
     lastQr = null;
     io.emit('disconnected', reason);
+    io.emit('status', { state: 'disconnected', qr: null });
 });
 
 // ============================================================
@@ -800,12 +815,25 @@ client.on('message_create', async (msg) => {
                 // STAGE 1: Background removal (if -borderless) — serialized on GPU
                 let mattedFrames: {framesDir: string, fps: number} | null = null;
                 if (wantsBorderless) {
-                    console.log(`[Pipeline] Stage 1: Background removal (${isVideo ? 'video' : 'image'})`);
+                    const matKind: 'mp4' | 'gif' = media.mimetype.includes('gif') ? 'gif' : 'mp4';
+                    console.log(
+                        `[Pipeline] Stage 1: Background removal (${isVideo ? 'video' : 'image'}, matting kind=${matKind})`,
+                    );
                     if (isStaticImage) {
-                        mediaBuffer = await mattingQueue.run(() => removeBackgroundFromImage(mediaBuffer));
+                        mediaBuffer = await mattingQueue.run(async () => {
+                            console.log('[Matting] Static image → SAM2…');
+                            const out = await removeBackgroundFromImage(mediaBuffer);
+                            console.log('[Matting] Static image done');
+                            return out;
+                        });
                         finalMimeType = 'image/png';
                     } else if (isVideo) {
-                        mattedFrames = await mattingQueue.run(() => removeBackgroundFromVideo(mediaBuffer));
+                        mattedFrames = await mattingQueue.run(async () => {
+                            console.log('[Matting] Video/GIF → SAM2 (can take several minutes on Apple Silicon)…');
+                            const out = await removeBackgroundFromVideo(mediaBuffer, matKind);
+                            console.log('[Matting] Video/GIF done');
+                            return out;
+                        });
                         finalMimeType = 'image/webp';
                     }
                 }

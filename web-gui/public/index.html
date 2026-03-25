@@ -236,14 +236,21 @@ function updateUI(state, qr) {
 
     logoutBtn.classList.add('hidden');
 
-    if (state === 'qr' && qr) {
+    if (state === 'qr') {
         document.getElementById('qrArea').classList.remove('hidden');
         dot.className = 'w-2.5 h-2.5 rounded-full bg-yellow-400 pulse';
-        text.textContent = 'Scan QR Code';
+        const qrStr = typeof qr === 'string' && qr.length > 0 ? qr : null;
+        text.textContent = qrStr ? 'Scan QR Code' : 'Waiting for QR code…';
         text.className = 'text-sm text-yellow-400';
-        QRCode.toCanvas(document.getElementById('qrCanvas'), qr, {
-            width: 256, margin: 0, color: { dark: '#000000', light: '#ffffff' }
-        });
+        if (qrStr && typeof QRCode !== 'undefined') {
+            try {
+                QRCode.toCanvas(document.getElementById('qrCanvas'), qrStr, {
+                    width: 256, margin: 0, color: { dark: '#000000', light: '#ffffff' }
+                });
+            } catch (e) {
+                console.error('QR render failed:', e);
+            }
+        }
     } else if (state === 'ready') {
         document.getElementById('connectedArea').classList.remove('hidden');
         dot.className = 'w-2.5 h-2.5 rounded-full bg-accent';
