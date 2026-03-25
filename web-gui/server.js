@@ -65,6 +65,14 @@ function connectToBot() {
         io.emit('status', { state: 'disconnected' });
     });
 
+    botSocket.on('request', (data) => {
+        io.emit('request', data);
+    });
+
+    botSocket.on('request:update', (data) => {
+        io.emit('request:update', data);
+    });
+
     botSocket.on('disconnect', () => {
         console.log('[Bridge] Lost connection to sticker-bot, will reconnect...');
     });
@@ -174,6 +182,15 @@ app.get('/api/contacts', async (_req, res) => {
 app.get('/api/groups', async (_req, res) => {
     try {
         const r = await fetch(`${BOT_WS_URL}/groups`);
+        res.json(await r.json());
+    } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+// --------------- Request history proxy ---------------
+
+app.get('/api/history', async (_req, res) => {
+    try {
+        const r = await fetch(`${BOT_WS_URL}/history`);
         res.json(await r.json());
     } catch (err) { res.status(502).json({ error: err.message }); }
 });

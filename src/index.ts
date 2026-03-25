@@ -13,6 +13,50 @@ import { Server as SocketIOServer } from 'socket.io';
 const execAsync = promisify(exec);
 
 // ============================================================
+// TASK QUEUE — limits concurrent sticker processing
+// ============================================================
+
+class TaskQueue {
+    private running = 0;
+    private waiting: (() => void)[] = [];
+    constructor(private concurrency: number) {}
+    async run<T>(fn: () => Promise<T>): Promise<T> {
+        while (this.running >= this.concurrency)
+            await new Promise<void>(resolve => this.waiting.push(resolve));
+        this.running++;
+        try { return await fn(); }
+        finally { this.running--; this.waiting.shift()?.(); }
+    }
+    get pending() { return this.waiting.length; }
+    get active() { return this.running; }
+}
+
+const stickerQueue = new TaskQueue(3);
+const mattingQueue = new TaskQueue(1);
+
+// ============================================================
+// REQUEST HISTORY — in-memory ring buffer (last 50)
+// ============================================================
+
+interface RequestRecord {
+    id: string;
+    from: string;
+    chatName: string;
+    flags: string;
+    mediaType: string;
+    timestamp: number;
+    status: 'queued' | 'processing' | 'done' | 'error';
+}
+
+const requestHistory: RequestRecord[] = [];
+const MAX_HISTORY = 50;
+
+function pushRequest(record: RequestRecord) {
+    requestHistory.unshift(record);
+    if (requestHistory.length > MAX_HISTORY) requestHistory.pop();
+}
+
+// ============================================================
 // WHITELIST (JSON file + in-memory Set for O(1) lookup)
 // ============================================================
 
@@ -602,6 +646,10 @@ app.get('/groups', async (_req, res) => {
     }
 });
 
+app.get('/history', (_req, res) => {
+    res.json(requestHistory);
+});
+
 httpServer.listen(3001, () => {
     console.log('[EventServer] Listening on port 3001 (internal)');
 });
@@ -655,138 +703,170 @@ client.on('message_create', async (msg) => {
     const lowerArgs = rawArgs.map(a => a.toLowerCase());
 
     if (command === '/sticker') {
+        // --- RESOLVE MEDIA TARGET (before queue — fast, no heavy work) ---
+        let mediaTarget = msg;
         try {
-            // --- RESOLVE MEDIA TARGET ---
-            let mediaTarget = msg;
             if (msg.hasQuotedMsg) {
                 const quotedMsg = await msg.getQuotedMessage();
                 if (quotedMsg.hasMedia) mediaTarget = quotedMsg;
             }
+        } catch { /* use original msg */ }
 
-            if (!mediaTarget.hasMedia) {
-                await msg.reply('Please attach media to your message, or reply to an existing image/video with /sticker');
-                return;
-            }
-            if (mediaTarget.type === 'sticker') {
-                await msg.reply('You cannot sticker a sticker! 🛑');
-                return;
-            }
+        if (!mediaTarget.hasMedia) {
+            await msg.reply('Please attach media to your message, or reply to an existing image/video with /sticker');
+            return;
+        }
+        if (mediaTarget.type === 'sticker') {
+            await msg.reply('You cannot sticker a sticker! 🛑');
+            return;
+        }
 
-            // --- PARSE FLAGS ---
-            let speedMultiplier = 1.0;
-            const speedIndex = lowerArgs.indexOf('-speed');
-            if (speedIndex !== -1 && rawArgs.length > speedIndex + 1) {
-                const parsed = parseFloat(rawArgs[speedIndex + 1]);
-                if (!isNaN(parsed)) speedMultiplier = Math.max(0.5, Math.min(2.0, parsed));
-            }
+        // --- BUILD REQUEST RECORD ---
+        const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        let chatName = msg.from;
+        try { chatName = (await msg.getChat()).name || msg.from; } catch {}
 
-            let topText = '';
-            const ttIndex = lowerArgs.indexOf('-tt');
-            if (ttIndex !== -1 && rawArgs.length > ttIndex + 1) {
-                topText = rawArgs[ttIndex + 1].replace(/^"|"$/g, '').toUpperCase();
-            }
+        const record: RequestRecord = {
+            id: requestId,
+            from: msg.from,
+            chatName,
+            flags: normalizedBody,
+            mediaType: 'pending',
+            timestamp: Date.now(),
+            status: 'queued'
+        };
+        pushRequest(record);
+        io.emit('request', record);
 
-            let bottomText = '';
-            const btIndex = lowerArgs.indexOf('-bt');
-            if (btIndex !== -1 && rawArgs.length > btIndex + 1) {
-                bottomText = rawArgs[btIndex + 1].replace(/^"|"$/g, '').toUpperCase();
-            }
+        // --- QUEUE THE HEAVY WORK ---
+        await stickerQueue.run(async () => {
+            record.status = 'processing';
+            io.emit('request:update', { id: requestId, status: 'processing' });
 
-            const wantsSquare = lowerArgs.includes('-square');
-            const wantsBorderless = lowerArgs.includes('-borderless');
-
-            // --- DOWNLOAD MEDIA ---
-            const downloadPromise = mediaTarget.downloadMedia();
-            const timeoutPromise = new Promise<undefined>((_, reject) => {
-                setTimeout(() => reject(new Error('DOWNLOAD_TIMEOUT')), 10000);
-            });
-
-            let media;
             try {
-                media = await Promise.race([downloadPromise, timeoutPromise]);
-                if (!media) return;
-            } catch (err: any) {
-                if (err.message === 'DOWNLOAD_TIMEOUT') {
-                    await msg.reply('I cannot download this media! It might be too old or no longer available on WhatsApp Web.');
+                // --- PARSE FLAGS ---
+                let speedMultiplier = 1.0;
+                const speedIndex = lowerArgs.indexOf('-speed');
+                if (speedIndex !== -1 && rawArgs.length > speedIndex + 1) {
+                    const parsed = parseFloat(rawArgs[speedIndex + 1]);
+                    if (!isNaN(parsed)) speedMultiplier = Math.max(0.5, Math.min(2.0, parsed));
+                }
+
+                let topText = '';
+                const ttIndex = lowerArgs.indexOf('-tt');
+                if (ttIndex !== -1 && rawArgs.length > ttIndex + 1) {
+                    topText = rawArgs[ttIndex + 1].replace(/^"|"$/g, '').toUpperCase();
+                }
+
+                let bottomText = '';
+                const btIndex = lowerArgs.indexOf('-bt');
+                if (btIndex !== -1 && rawArgs.length > btIndex + 1) {
+                    bottomText = rawArgs[btIndex + 1].replace(/^"|"$/g, '').toUpperCase();
+                }
+
+                const wantsSquare = lowerArgs.includes('-square');
+                const wantsBorderless = lowerArgs.includes('-borderless');
+
+                // --- DOWNLOAD MEDIA ---
+                const downloadPromise = mediaTarget.downloadMedia();
+                const timeoutPromise = new Promise<undefined>((_, reject) => {
+                    setTimeout(() => reject(new Error('DOWNLOAD_TIMEOUT')), 10000);
+                });
+
+                let media;
+                try {
+                    media = await Promise.race([downloadPromise, timeoutPromise]);
+                    if (!media) return;
+                } catch (err: any) {
+                    if (err.message === 'DOWNLOAD_TIMEOUT') {
+                        await msg.reply('I cannot download this media! It might be too old or no longer available on WhatsApp Web.');
+                        return;
+                    }
+                    throw err;
+                }
+
+                const isVideo = media.mimetype.includes('video') || media.mimetype.includes('gif');
+                const isStaticImage = media.mimetype.includes('image') && !isVideo;
+                record.mediaType = isVideo ? 'video' : 'image';
+                let mediaBuffer: any = Buffer.from(media.data, 'base64');
+                let finalMimeType = media.mimetype;
+
+                // ==============================================
+                // PIPELINE EXECUTION (ordered correctly)
+                // ==============================================
+
+                // STAGE 1: Background removal (if -borderless) — serialized on GPU
+                let mattedFrames: {framesDir: string, fps: number} | null = null;
+                if (wantsBorderless) {
+                    console.log(`[Pipeline] Stage 1: Background removal (${isVideo ? 'video' : 'image'})`);
+                    if (isStaticImage) {
+                        mediaBuffer = await mattingQueue.run(() => removeBackgroundFromImage(mediaBuffer));
+                        finalMimeType = 'image/png';
+                    } else if (isVideo) {
+                        mattedFrames = await mattingQueue.run(() => removeBackgroundFromVideo(mediaBuffer));
+                        finalMimeType = 'image/webp';
+                    }
+                }
+
+                // Generate text overlay via Puppeteer if needed
+                let overlaySrc: string | undefined = undefined;
+                if (topText || bottomText) {
+                    const timestamp = Date.now();
+                    const browser = (client as any).pupBrowser;
+                    overlaySrc = await buildTextOverlayImage(browser, topText, bottomText, timestamp);
+                }
+
+                // STAGE 2: Processing (scale → speed → text → encoding)
+                if (isVideo) {
+                    console.log(`[Pipeline] Stage 2: Video processing (speed=${speedMultiplier}, text=${!!topText || !!bottomText})`);
+                    mediaBuffer = await processVideoToWebp(mediaBuffer, {
+                        square: wantsSquare,
+                        borderless: wantsBorderless,
+                        speed: speedMultiplier,
+                        overlaySrc,
+                        framesDir: mattedFrames?.framesDir,
+                        framesFps: mattedFrames?.fps
+                    });
+                    finalMimeType = 'image/webp';
+                } else if (isStaticImage && (wantsSquare || wantsBorderless || topText || bottomText)) {
+                    console.log(`[Pipeline] Stage 2: Image processing`);
+                    const imgResult = await processImage(mediaBuffer, {
+                        square: wantsSquare,
+                        borderless: wantsBorderless,
+                        overlaySrc
+                    });
+                    mediaBuffer = imgResult.buffer;
+                    finalMimeType = imgResult.mimeType;
+                }
+
+                // STAGE 3: Send the sticker
+                const processedMedia = new MessageMedia(
+                    finalMimeType,
+                    mediaBuffer.toString('base64'),
+                    media.filename || 'sticker.mp4'
+                );
+
+                await msg.reply(processedMedia, undefined, {
+                    sendMediaAsSticker: true,
+                    stickerName: 'Generated via Bot',
+                    stickerAuthor: 'My Sticker Bot'
+                });
+
+                record.status = 'done';
+                io.emit('request:update', { id: requestId, status: 'done' });
+
+            } catch (error: any) {
+                record.status = 'error';
+                io.emit('request:update', { id: requestId, status: 'error' });
+
+                if (error instanceof MattingServiceUnavailableError) {
+                    await msg.reply('The -borderless flag requires the GPU matting service, which is not running.\n\nThis is the lite build. To enable background removal, restart with:\n  docker compose --profile gpu up --build');
                     return;
                 }
-                throw err;
+                console.error('Failed to process sticker:', error);
+                await msg.reply('Oops, something went wrong while creating your sticker.');
             }
-
-            const isVideo = media.mimetype.includes('video') || media.mimetype.includes('gif');
-            const isStaticImage = media.mimetype.includes('image') && !isVideo;
-            let mediaBuffer: any = Buffer.from(media.data, 'base64');
-            let finalMimeType = media.mimetype;
-
-            // ==============================================
-            // PIPELINE EXECUTION (ordered correctly)
-            // ==============================================
-
-            // STAGE 1: Background removal (if -borderless)
-            let mattedFrames: {framesDir: string, fps: number} | null = null;
-            if (wantsBorderless) {
-                console.log(`[Pipeline] Stage 1: Background removal (${isVideo ? 'video' : 'image'})`);
-                if (isStaticImage) {
-                    mediaBuffer = await removeBackgroundFromImage(mediaBuffer);
-                    finalMimeType = 'image/png';
-                } else if (isVideo) {
-                    mattedFrames = await removeBackgroundFromVideo(mediaBuffer);
-                    finalMimeType = 'image/webp';
-                }
-            }
-
-            // Generate text overlay via Puppeteer if needed
-            let overlaySrc: string | undefined = undefined;
-            if (topText || bottomText) {
-                const timestamp = Date.now();
-                const browser = (client as any).pupBrowser;
-                overlaySrc = await buildTextOverlayImage(browser, topText, bottomText, timestamp);
-            }
-
-            // STAGE 2: Processing (scale → speed → text → encoding)
-            if (isVideo) {
-                console.log(`[Pipeline] Stage 2: Video processing (speed=${speedMultiplier}, text=${!!topText || !!bottomText})`);
-                mediaBuffer = await processVideoToWebp(mediaBuffer, {
-                    square: wantsSquare,
-                    borderless: wantsBorderless,
-                    speed: speedMultiplier,
-                    overlaySrc,
-                    framesDir: mattedFrames?.framesDir,
-                    framesFps: mattedFrames?.fps
-                });
-                finalMimeType = 'image/webp';
-            } else if (isStaticImage && (wantsSquare || wantsBorderless || topText || bottomText)) {
-                console.log(`[Pipeline] Stage 2: Image processing`);
-                const imgResult = await processImage(mediaBuffer, {
-                    square: wantsSquare,
-                    borderless: wantsBorderless,
-                    overlaySrc
-                });
-                mediaBuffer = imgResult.buffer;
-                finalMimeType = imgResult.mimeType;
-            }
-
-            // STAGE 3: Send the sticker
-            const processedMedia = new MessageMedia(
-                finalMimeType,
-                mediaBuffer.toString('base64'),
-                media.filename || 'sticker.mp4'
-            );
-
-            await msg.reply(processedMedia, undefined, {
-                sendMediaAsSticker: true,
-                stickerName: 'Generated via Bot',
-                stickerAuthor: 'My Sticker Bot'
-            });
-
-        } catch (error: any) {
-            if (error instanceof MattingServiceUnavailableError) {
-                await msg.reply('The -borderless flag requires the GPU matting service, which is not running.\n\nThis is the lite build. To enable background removal, restart with:\n  docker compose --profile gpu up --build');
-                return;
-            }
-            console.error('Failed to process sticker:', error);
-            await msg.reply('Oops, something went wrong while creating your sticker.');
-        }
+        });
     }
 });
 

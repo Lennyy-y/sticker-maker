@@ -16,8 +16,9 @@ Two build modes:
 - **Text Overlays** — meme-style top/bottom text rendered via Puppeteer with full emoji and Unicode support
 - **Speed Control** — adjust video playback speed from 0.5x to 2x
 - **Reply Support** — reply to any existing image/video with `/sticker` to convert it
+- **Concurrency Queue** — up to 3 sticker requests process in parallel; GPU matting serialized to 1 at a time to prevent OOM; additional requests wait in queue (never dropped)
 - **Whitelist** — restrict the bot to specific contacts or groups via the dashboard (O(1) lookup, persisted to disk)
-- **Web Dashboard** — browser-based control panel for QR code scanning, connection status, GPU mode toggling, and whitelist management
+- **Web Dashboard** — browser-based control panel for QR code scanning, connection status, GPU mode toggling, whitelist management, and live request history
 
 ## Usage
 
@@ -46,8 +47,8 @@ The project runs as three Docker containers:
 
 | Service | Description |
 |---|---|
-| **sticker-bot** | Node.js/TypeScript WhatsApp client using `whatsapp-web.js` + Puppeteer. Handles message parsing, media download, text overlay rendering, video encoding, sticker delivery, and whitelist filtering. Exposes an internal API + Socket.IO server on port 3001 for the dashboard. |
-| **web-gui** | Node.js Express dashboard served on port 3000. Bridges bot events (QR code, connection status) to the browser via Socket.IO, controls Docker services (GPU toggle) via the mounted Docker socket, and provides a UI for whitelist management. |
+| **sticker-bot** | Node.js/TypeScript WhatsApp client using `whatsapp-web.js` + Puppeteer. Handles message parsing, media download, text overlay rendering, video encoding, sticker delivery, whitelist filtering, and concurrency-limited request queuing. Exposes an internal API + Socket.IO server on port 3001 for the dashboard. |
+| **web-gui** | Node.js Express dashboard served on port 3000. Bridges bot events (QR code, connection status, request history) to the browser via Socket.IO, controls Docker services (GPU toggle) via the mounted Docker socket, and provides a UI for whitelist management and live request monitoring. |
 | **video-matting** | Python FastAPI service running SAM 2.1 (hiera_large) on GPU. Provides `/process-image` and `/process` endpoints for background removal on static images and video frame sequences. Only runs when GPU profile is active. |
 
 ```
@@ -59,6 +60,7 @@ Browser ←→ web-gui (:3000)
 
 WhatsApp ←→ sticker-bot (Node.js)
                  │
+                 ├── Concurrency queue (3 stickers, 1 GPU matting)
                  ├── Whitelist filter (O(1) Set lookup)
                  ├── Sharp (image/video frame encoding + WebP assembly)
                  ├── FFmpeg (video frame extraction + filtering)
