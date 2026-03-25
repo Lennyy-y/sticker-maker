@@ -221,6 +221,7 @@ const socket = io();
 let currentState = 'initializing';
 let gpuRunning = false;
 let gpuTransitioning = false;
+let nativeMode = false;
 
 // ---- State management ----
 
@@ -268,6 +269,20 @@ function updateGpuUI(running) {
     const thumb = document.getElementById('gpuThumb');
     const label = document.getElementById('gpuModeLabel');
     const status = document.getElementById('gpuStatusLabel');
+
+    if (nativeMode) {
+        toggle.classList.add('hidden');
+        if (running) {
+            label.textContent = 'Matting Service';
+            status.textContent = 'Running (native)';
+            status.className = 'text-xs text-accent';
+        } else {
+            label.textContent = 'Matting Service';
+            status.textContent = 'Not running';
+            status.className = 'text-xs text-gray-500';
+        }
+        return;
+    }
 
     if (running) {
         toggle.classList.remove('bg-gray-600');
@@ -385,6 +400,7 @@ async function boot() {
             if (!statusRes.ok || !wlRes.ok) throw new Error('not ready');
 
             const statusData = await statusRes.json();
+            if (statusData.nativeMode) nativeMode = true;
             updateUI(statusData.bot.state, statusData.bot.qr);
             updateGpuUI(statusData.gpu.status === 'running');
 

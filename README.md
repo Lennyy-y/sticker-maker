@@ -4,9 +4,10 @@ A WhatsApp bot that turns images and videos into stickers, with optional GPU-acc
 
 Send `/sticker` with any image or video in WhatsApp and get a sticker back instantly.
 
-Two build modes:
-- **Lite** — just the bot, no GPU needed. Runs on any machine.
-- **Full** — adds the SAM 2.1 GPU matting service for background removal (`-borderless` flag).
+Three deployment options:
+- **Lite (Docker)** — just the bot, no GPU needed. Runs on any machine.
+- **Full (Docker + NVIDIA)** — adds the SAM 2.1 GPU matting service for background removal (`-borderless` flag).
+- **Native (macOS / Apple Silicon)** — runs everything natively with Metal/MPS acceleration. No Docker required.
 
 ## Features
 
@@ -49,7 +50,7 @@ The project runs as three Docker containers:
 |---|---|
 | **sticker-bot** | Node.js/TypeScript WhatsApp client using `whatsapp-web.js` + Puppeteer. Handles message parsing, media download, text overlay rendering, video encoding, sticker delivery, whitelist filtering, and concurrency-limited request queuing. Exposes an internal API + Socket.IO server on port 3001 for the dashboard. |
 | **web-gui** | Node.js Express dashboard served on port 3000. Bridges bot events (QR code, connection status, request history) to the browser via Socket.IO, controls Docker services (GPU toggle) via the mounted Docker socket, and provides a UI for whitelist management and live request monitoring. |
-| **video-matting** | Python FastAPI service running SAM 2.1 (hiera_large) on GPU. Provides `/process-image` and `/process` endpoints for background removal on static images and video frame sequences. Only runs when GPU profile is active. |
+| **video-matting** | Python FastAPI service running SAM 2.1 (hiera_large) on GPU. Provides `/process-image` and `/process` endpoints for background removal on static images and video frame sequences. Auto-detects CUDA, Metal/MPS, or CPU. Only runs when GPU profile is active (Docker) or launched via start script (native). |
 
 ```
 Browser ←→ web-gui (:3000)
@@ -66,18 +67,26 @@ WhatsApp ←→ sticker-bot (Node.js)
                  ├── FFmpeg (video frame extraction + filtering)
                  ├── Puppeteer (text overlay rendering)
                  │
-                 └──→ video-matting (Python/CUDA)
+                 └──→ video-matting (Python/CUDA or Metal/MPS)
                         ├── SAM 2.1 automatic mask generator
                         └── SAM 2.1 video predictor (temporal propagation)
 ```
 
 ## Prerequisites
 
+**Docker (Linux/Windows):**
 - Docker
 - A WhatsApp account to link via QR code
 - *(Full build only)* NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 
+**Native (macOS / Apple Silicon):**
+- macOS with Apple Silicon (M1/M2/M3/M4)
+- A WhatsApp account to link via QR code
+- The setup script handles all other dependencies (Homebrew, Python, Node.js, FFmpeg, PyTorch, SAM2)
+
 ## Getting Started
+
+### Docker (Linux / Windows)
 
 1. **Clone the repo:**
 
@@ -104,12 +113,44 @@ WhatsApp ←→ sticker-bot (Node.js)
 
 4. **Send `/sticker`** with an image or video in any chat.
 
+### macOS / Apple Silicon
+
+Docker on macOS cannot pass Metal GPU access to containers, so the native path runs everything directly on the host with Metal/MPS acceleration.
+
+1. **Clone and set up:**
+
+   ```bash
+   git clone https://github.com/Lennyy-y/sticker-maker.git
+   cd sticker-maker
+   chmod +x scripts/*.sh
+   ./scripts/setup-mac.sh
+   ```
+
+   The setup script installs all dependencies via Homebrew and pip, and downloads the SAM 2.1 checkpoint (~900 MB). Only needs to run once.
+
+2. **Start all services:**
+
+   ```bash
+   ./scripts/start.sh           # full (with Metal GPU matting)
+   ./scripts/start.sh --lite    # lite (no background removal)
+   ```
+
+3. **Open the dashboard** at [http://localhost:3000](http://localhost:3000) and scan the QR code. The matting service status is shown on the dashboard (toggle is disabled — lifecycle managed by the scripts).
+
+4. **Stop all services:**
+
+   ```bash
+   ./scripts/stop.sh
+   ```
+
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `MATTING_API_URL` | `http://video-matting:8000` | URL of the matting service (set automatically in Docker) |
+| `MATTING_API_URL` | `http://localhost:8000` | URL of the matting service. Set to `http://video-matting:8000` in Docker. |
 | `DATA_DIR` | `./data` (relative to project root) | Directory for persistent settings (whitelist). Set to `/usr/src/app/data` in Docker. |
+| `SAM2_CHECKPOINT` | `./checkpoints/sam2.1_hiera_large.pt` | Path to SAM 2.1 checkpoint. Set to `/app/checkpoints/...` in Docker. |
+| `NATIVE_MODE` | `0` | Set to `1` by start scripts on macOS. Disables Docker-based GPU toggle in the dashboard. |
 
 Whitelist settings are persisted to `DATA_DIR/whitelist.json` and survive container restarts (backed by the `bot-data` Docker volume).
 

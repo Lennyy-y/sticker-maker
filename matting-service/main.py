@@ -15,9 +15,21 @@ import io
 auto_mask_generator = None
 video_predictor = None
 
-CHECKPOINT = "/app/checkpoints/sam2.1_hiera_large.pt"
+
+def get_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+DEVICE = get_device()
+CHECKPOINT = os.environ.get(
+    "SAM2_CHECKPOINT",
+    os.path.join(os.path.dirname(__file__), "checkpoints", "sam2.1_hiera_large.pt"),
+)
 MODEL_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
-DEVICE = "cuda"
 MAX_FRAMES = 90
 
 
@@ -172,7 +184,7 @@ def analyze_foreground(img_np: np.ndarray):
 async def lifespan(app: FastAPI):
     global auto_mask_generator, video_predictor
 
-    print("Loading SAM 2.1 hiera_large into GPU...")
+    print(f"Loading SAM 2.1 hiera_large on {DEVICE.upper()}...")
 
     if DEVICE == "cuda":
         torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
@@ -184,6 +196,8 @@ async def lifespan(app: FastAPI):
     from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
     sam2_model = build_sam2(MODEL_CFG, CHECKPOINT, device=DEVICE)
+    if DEVICE == "mps":
+        sam2_model = sam2_model.float()
     auto_mask_generator = SAM2AutomaticMaskGenerator(
         model=sam2_model,
         points_per_side=32,
@@ -194,12 +208,13 @@ async def lifespan(app: FastAPI):
     print("SAM2 automatic mask generator ready.")
 
     video_predictor = build_sam2_video_predictor(MODEL_CFG, CHECKPOINT, device=DEVICE)
+    if DEVICE == "mps":
+        video_predictor.model = video_predictor.model.float()
     print("SAM2 video predictor ready.")
 
-    # Warm up with a dummy image
     dummy = np.ones((64, 64, 3), dtype=np.uint8) * 128
     _ = auto_mask_generator.generate(dummy)
-    print("SAM 2.1 hiera_large fully loaded on GPU and warmed up.")
+    print(f"SAM 2.1 hiera_large fully loaded on {DEVICE.upper()} and warmed up.")
     yield
 
 
@@ -333,7 +348,12 @@ async def process_video(file: UploadFile = File(...)):
         print(f"  [Video] Prompting with {len(fg_points)} positive + "
               f"{len(bg_points)} negative points, bbox {fg_box.tolist()}")
 
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        autocast_ctx = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if DEVICE == "cuda"
+            else torch.autocast(DEVICE, enabled=False)
+        )
+        with torch.inference_mode(), autocast_ctx:
             state = video_predictor.init_state(video_path=jpeg_dir)
 
             # Feed per-segment positive points + background negative points + tight bbox

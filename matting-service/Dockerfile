@@ -36,6 +36,7 @@ RUN mkdir -p /app/checkpoints && \
     https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
 
 ENV PYTHONUNBUFFERED=1
+ENV SAM2_CHECKPOINT=/app/checkpoints/sam2.1_hiera_large.pt
 
 COPY . .
 

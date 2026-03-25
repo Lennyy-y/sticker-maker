@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { writeFileSync, readFileSync, unlinkSync, mkdirSync, readdirSync, rmSync } from 'fs';
+import os from 'os';
 import path from 'path';
 import axios from 'axios';
 import FormData from 'form-data';
@@ -11,6 +12,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 const execAsync = promisify(exec);
+const MATTING_URL = process.env.MATTING_API_URL || 'http://localhost:8000';
 
 // ============================================================
 // TASK QUEUE — limits concurrent sticker processing
@@ -230,7 +232,7 @@ async function removeBackgroundFromImage(buffer: Buffer): Promise<Buffer> {
     form.append('file', cleanPng, { filename: 'input.png', contentType: 'image/png' });
 
     try {
-        const response = await axios.post('http://video-matting:8000/process-image', form, {
+        const response = await axios.post(`${MATTING_URL}/process-image`, form, {
             headers: form.getHeaders(),
             responseType: 'arraybuffer',
             timeout: 60000
@@ -251,7 +253,7 @@ async function removeBackgroundFromVideo(buffer: Buffer): Promise<{framesDir: st
 
     let response;
     try {
-        response = await axios.post('http://video-matting:8000/process', form, {
+        response = await axios.post(`${MATTING_URL}/process`, form, {
             headers: form.getHeaders(),
             responseType: 'arraybuffer',
             timeout: 120000
@@ -262,8 +264,8 @@ async function removeBackgroundFromVideo(buffer: Buffer): Promise<{framesDir: st
     }
 
     const timestamp = Date.now();
-    const tarPath = path.join('/tmp', `matting_${timestamp}.tar`);
-    const framesDir = path.join('/tmp', `matting_frames_${timestamp}`);
+    const tarPath = path.join(os.tmpdir(), `matting_${timestamp}.tar`);
+    const framesDir = path.join(os.tmpdir(), `matting_frames_${timestamp}`);
     mkdirSync(framesDir, { recursive: true });
     writeFileSync(tarPath, Buffer.from(response.data));
 

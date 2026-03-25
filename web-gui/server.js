@@ -3,13 +3,22 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { io: ioClient } = require('socket.io-client');
 const { execFile } = require('child_process');
-const Docker = require('dockerode');
 const path = require('path');
+
+const NATIVE_MODE = process.env.NATIVE_MODE === '1';
+const MATTING_URL = process.env.MATTING_URL || 'http://localhost:8000';
+
+let docker = null;
+if (!NATIVE_MODE) {
+    try {
+        const Docker = require('dockerode');
+        docker = new Docker({ socketPath: '/var/run/docker.sock' });
+    } catch {}
+}
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const BOT_WS_URL = process.env.BOT_WS_URL || 'http://sticker-bot:3001';
 const COMPOSE_FILE = process.env.COMPOSE_FILE || '/app/docker-compose.yml';
@@ -84,13 +93,25 @@ connectToBot();
 
 app.get('/api/status', async (_req, res) => {
     let gpuStatus = 'not_created';
-    try {
-        const container = docker.getContainer('video-matting-api');
-        const info = await container.inspect();
-        gpuStatus = info.State.Running ? 'running' : 'stopped';
-    } catch {}
 
-    res.json({ bot: { state: botState, qr: botState === 'qr' ? lastQr : undefined }, gpu: { status: gpuStatus } });
+    if (docker) {
+        try {
+            const container = docker.getContainer('video-matting-api');
+            const info = await container.inspect();
+            gpuStatus = info.State.Running ? 'running' : 'stopped';
+        } catch {}
+    } else {
+        try {
+            const r = await fetch(`${MATTING_URL}/docs`, { signal: AbortSignal.timeout(2000) });
+            gpuStatus = r.ok ? 'running' : 'stopped';
+        } catch { gpuStatus = 'not_running'; }
+    }
+
+    res.json({
+        bot: { state: botState, qr: botState === 'qr' ? lastQr : undefined },
+        gpu: { status: gpuStatus },
+        nativeMode: NATIVE_MODE,
+    });
 });
 
 function runCompose(args) {
@@ -109,6 +130,7 @@ function runCompose(args) {
 }
 
 app.post('/api/gpu/start', async (_req, res) => {
+    if (NATIVE_MODE) return res.status(400).json({ success: false, error: 'GPU service is managed externally in native mode' });
     try {
         await runCompose(['--profile', 'gpu', 'up', '-d', 'video-matting']);
         res.json({ success: true, status: 'running' });
@@ -118,6 +140,7 @@ app.post('/api/gpu/start', async (_req, res) => {
 });
 
 app.post('/api/gpu/stop', async (_req, res) => {
+    if (NATIVE_MODE) return res.status(400).json({ success: false, error: 'GPU service is managed externally in native mode' });
     try {
         await runCompose(['stop', 'video-matting']);
         res.json({ success: true, status: 'stopped' });

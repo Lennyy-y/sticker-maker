@@ -34,3 +34,9 @@ test_text_overlay.png
 # Environment
 .env
 .env.*
+
+# Native macOS setup artifacts
+matting-service/.venv/
+matting-service/checkpoints/
+scripts/.pids
+scripts/.logs/
