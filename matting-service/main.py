@@ -209,7 +209,7 @@ async def lifespan(app: FastAPI):
 
     video_predictor = build_sam2_video_predictor(MODEL_CFG, CHECKPOINT, device=DEVICE)
     if DEVICE == "mps":
-        video_predictor.model = video_predictor.model.float()
+        video_predictor.float()
     print("SAM2 video predictor ready.")
 
     dummy = np.ones((64, 64, 3), dtype=np.uint8) * 128
