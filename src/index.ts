@@ -10,8 +10,35 @@ import FormData from 'form-data';
 import express from 'express';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
-
 const execAsync = promisify(exec);
+
+// ============================================================
+// WHITELIST (JSON file + in-memory Set for O(1) lookup)
+// ============================================================
+
+interface WhitelistEntry { chat_id: string; name: string; type: 'contact' | 'group'; }
+interface WhitelistData { enabled: boolean; entries: WhitelistEntry[]; }
+
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+mkdirSync(DATA_DIR, { recursive: true });
+const WL_PATH = path.join(DATA_DIR, 'whitelist.json');
+
+function loadWhitelistData(): WhitelistData {
+    try {
+        return JSON.parse(readFileSync(WL_PATH, 'utf-8'));
+    } catch {
+        return { enabled: false, entries: [] };
+    }
+}
+
+function saveWhitelistData(data: WhitelistData) {
+    writeFileSync(WL_PATH, JSON.stringify(data, null, 2));
+}
+
+const wlData = loadWhitelistData();
+let whitelistEnabled = wlData.enabled;
+const whitelistSet = new Set<string>(wlData.entries.map(e => e.chat_id));
+console.log(`[Whitelist] Loaded: enabled=${whitelistEnabled}, ${whitelistSet.size} entries`);
 
 // ============================================================
 // Animated WebP builder — uses sharp-encoded frames (same libwebp
@@ -512,6 +539,69 @@ app.post('/logout', async (_req, res) => {
     }
 });
 
+// --------------- Whitelist API ---------------
+
+app.get('/whitelist', (_req, res) => {
+    const data = loadWhitelistData();
+    res.json({ enabled: data.enabled, entries: data.entries.sort((a, b) => a.name.localeCompare(b.name)) });
+});
+
+app.put('/whitelist/enabled', (req, res) => {
+    const enabled = !!req.body.enabled;
+    const data = loadWhitelistData();
+    data.enabled = enabled;
+    saveWhitelistData(data);
+    whitelistEnabled = enabled;
+    console.log(`[Whitelist] ${enabled ? 'Enabled' : 'Disabled'}`);
+    res.json({ success: true, enabled });
+});
+
+app.post('/whitelist/entry', (req, res) => {
+    const { chat_id, name, type } = req.body;
+    if (!chat_id || !name || !type) return res.status(400).json({ error: 'chat_id, name, type required' });
+    const data = loadWhitelistData();
+    data.entries = data.entries.filter(e => e.chat_id !== chat_id);
+    data.entries.push({ chat_id, name, type });
+    saveWhitelistData(data);
+    whitelistSet.add(chat_id);
+    console.log(`[Whitelist] Added ${type}: ${name} (${chat_id})`);
+    res.json({ success: true });
+});
+
+app.delete('/whitelist/entry/:chatId', (req, res) => {
+    const chatId = decodeURIComponent(req.params.chatId);
+    const data = loadWhitelistData();
+    data.entries = data.entries.filter(e => e.chat_id !== chatId);
+    saveWhitelistData(data);
+    whitelistSet.delete(chatId);
+    console.log(`[Whitelist] Removed: ${chatId}`);
+    res.json({ success: true });
+});
+
+app.get('/contacts', async (_req, res) => {
+    try {
+        const contacts = await client.getContacts();
+        const result = contacts
+            .filter(c => !c.isGroup && !c.isMe && c.id._serialized.endsWith('@c.us'))
+            .map(c => ({ id: c.id._serialized, name: c.name || c.pushname || c.number || c.id.user, number: c.number }));
+        res.json(result);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/groups', async (_req, res) => {
+    try {
+        const chats = await client.getChats();
+        const groups = chats
+            .filter(c => c.isGroup)
+            .map(c => ({ id: c.id._serialized, name: c.name, participantCount: (c as any).participants?.length || 0 }));
+        res.json(groups);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 httpServer.listen(3001, () => {
     console.log('[EventServer] Listening on port 3001 (internal)');
 });
@@ -549,6 +639,7 @@ client.on('disconnected', (reason) => {
 
 client.on('message_create', async (msg) => {
     if (msg.timestamp < BOOT_TIMESTAMP) return;
+    if (whitelistEnabled && !whitelistSet.has(msg.from)) return;
 
     // Normalize every known Unicode quotation mark variant → ASCII straight quotes.
     // Covers: smart quotes, Hebrew gershayim/geresh, guillemets, fullwidth,

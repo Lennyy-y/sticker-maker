@@ -22,6 +22,10 @@ yarn-error.log*
 
 # WhatsApp session data
 .wwebjs_auth/
+.wwebjs_cache/
+
+# Bot persistent data (whitelist, settings)
+data/
 
 # Test artifacts
 testgifs/
@@ -29,3 +33,4 @@ test_text_overlay.png
 
 # Environment
 .env
+.env.*

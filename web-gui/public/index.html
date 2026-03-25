@@ -31,6 +31,15 @@
     </style>
 </head>
 <body class="dark min-h-screen text-gray-200 flex items-center justify-center p-4">
+    <!-- Boot overlay — blocks all interaction until bot is ready -->
+    <div id="bootOverlay" class="fixed inset-0 z-50 bg-[#0f0f1a] flex flex-col items-center justify-center gap-4">
+        <svg class="w-10 h-10 text-gray-500 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+        </svg>
+        <p class="text-gray-500 text-sm">Connecting to bot...</p>
+    </div>
+
     <div class="w-full max-w-md space-y-4 fade-in">
 
         <!-- Header -->
@@ -129,10 +138,67 @@
             </div>
         </div>
 
-        <!-- Settings Placeholder -->
-        <div class="bg-surface rounded-xl border border-surface-border p-5 opacity-50">
-            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Settings</h2>
-            <p class="text-xs text-gray-500 mt-2">Coming soon</p>
+        <!-- Whitelist Settings Card -->
+        <div class="bg-surface rounded-xl border border-surface-border p-5">
+            <div class="flex items-center justify-between mb-1">
+                <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Whitelist</h2>
+            </div>
+            <p class="text-xs text-gray-500 mb-4">Restrict the bot to only respond in specific chats</p>
+
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <p id="wlModeLabel" class="text-white font-medium">Disabled</p>
+                    <p id="wlStatusLabel" class="text-xs text-gray-500">Bot responds to everyone</p>
+                </div>
+                <button id="wlToggle" onclick="toggleWhitelist()"
+                    class="relative inline-flex h-7 w-12 items-center rounded-full toggle-track bg-gray-600 transition-colors"
+                    role="switch" aria-checked="false">
+                    <span id="wlThumb" class="toggle-thumb inline-block h-5 w-5 rounded-full bg-white shadow transform translate-x-1"></span>
+                </button>
+            </div>
+
+            <!-- Whitelist entries -->
+            <div id="wlEntries" class="hidden space-y-2 mb-3">
+                <div id="wlList" class="flex flex-wrap gap-2"></div>
+                <button onclick="openPicker()"
+                    class="w-full py-2 px-3 rounded-lg text-sm border border-dashed border-surface-border
+                           text-gray-400 hover:text-accent hover:border-accent/30 transition-colors flex items-center justify-center gap-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                    </svg>
+                    Add contact or group
+                </button>
+            </div>
+        </div>
+
+        <!-- Picker Modal (hidden by default) -->
+        <div id="pickerOverlay" class="hidden fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4" onclick="closePicker(event)">
+            <div class="bg-surface border border-surface-border rounded-xl w-full max-w-md max-h-[80vh] flex flex-col" onclick="event.stopPropagation()">
+                <div class="p-4 border-b border-surface-border">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-white font-semibold">Add to Whitelist</h3>
+                        <button onclick="closePicker()" class="text-gray-500 hover:text-gray-300">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <!-- Tabs -->
+                    <div class="flex gap-2 mb-3">
+                        <button id="tabContacts" onclick="switchTab('contacts')"
+                            class="flex-1 py-1.5 text-sm rounded-lg font-medium bg-accent/10 text-accent">Contacts</button>
+                        <button id="tabGroups" onclick="switchTab('groups')"
+                            class="flex-1 py-1.5 text-sm rounded-lg font-medium bg-surface-light text-gray-400">Groups</button>
+                    </div>
+                    <input id="pickerSearch" type="text" placeholder="Search..."
+                        class="w-full px-3 py-2 rounded-lg bg-surface-light border border-surface-border text-sm text-white placeholder-gray-500 outline-none focus:border-accent/50"
+                        oninput="filterPicker()">
+                </div>
+                <div class="overflow-y-auto flex-1 p-2">
+                    <p id="pickerLoading" class="text-center text-sm text-gray-500 py-8">Loading...</p>
+                    <div id="pickerList" class="space-y-1"></div>
+                </div>
+            </div>
         </div>
 
         <p class="text-center text-xs text-gray-600 pt-2">Sticker Bot Dashboard</p>
@@ -229,6 +295,7 @@ socket.on('authenticated', () => {
 // ---- API calls ----
 
 async function doLogout() {
+    if (!dashboardReady) return;
     const btn = document.getElementById('logoutBtn');
     btn.disabled = true;
     btn.textContent = 'Logging out...';
@@ -242,7 +309,7 @@ async function doLogout() {
 }
 
 async function toggleGpu() {
-    if (gpuTransitioning) return;
+    if (!dashboardReady || gpuTransitioning) return;
     gpuTransitioning = true;
 
     const loading = document.getElementById('gpuLoading');
@@ -282,8 +349,221 @@ async function pollStatus() {
     } catch {}
 }
 
-pollStatus();
-setInterval(pollStatus, 10000);
+let dashboardReady = false;
+
+async function boot() {
+    const overlay = document.getElementById('bootOverlay');
+    while (true) {
+        try {
+            const [statusRes, wlRes] = await Promise.all([
+                fetch('/api/status'),
+                fetch('/api/whitelist')
+            ]);
+            if (!statusRes.ok || !wlRes.ok) throw new Error('not ready');
+
+            const statusData = await statusRes.json();
+            updateUI(statusData.bot.state, statusData.bot.qr);
+            updateGpuUI(statusData.gpu.status === 'running');
+
+            const wlData = await wlRes.json();
+            wlEnabled = wlData.enabled;
+            wlEntries = wlData.entries || [];
+            updateWlUI();
+
+            dashboardReady = true;
+            overlay.classList.add('hidden');
+            break;
+        } catch {
+            await new Promise(r => setTimeout(r, 2000));
+        }
+    }
+}
+
+boot();
+setInterval(() => { if (dashboardReady) pollStatus(); }, 10000);
+
+// ---- Whitelist ----
+
+let wlEnabled = false;
+let wlEntries = [];
+let pickerTab = 'contacts';
+let pickerContacts = [];
+let pickerGroups = [];
+
+function updateWlUI() {
+    const toggle = document.getElementById('wlToggle');
+    const thumb = document.getElementById('wlThumb');
+    const label = document.getElementById('wlModeLabel');
+    const status = document.getElementById('wlStatusLabel');
+    const entries = document.getElementById('wlEntries');
+
+    if (wlEnabled) {
+        toggle.classList.remove('bg-gray-600');
+        toggle.classList.add('bg-accent');
+        toggle.setAttribute('aria-checked', 'true');
+        thumb.classList.remove('translate-x-1');
+        thumb.classList.add('translate-x-6');
+        label.textContent = 'Enabled';
+        status.textContent = wlEntries.length + ' allowed ' + (wlEntries.length === 1 ? 'chat' : 'chats');
+        status.className = 'text-xs text-accent';
+        entries.classList.remove('hidden');
+    } else {
+        toggle.classList.remove('bg-accent');
+        toggle.classList.add('bg-gray-600');
+        toggle.setAttribute('aria-checked', 'false');
+        thumb.classList.remove('translate-x-6');
+        thumb.classList.add('translate-x-1');
+        label.textContent = 'Disabled';
+        status.textContent = 'Bot responds to everyone';
+        status.className = 'text-xs text-gray-500';
+        entries.classList.add('hidden');
+    }
+    renderWlList();
+}
+
+function renderWlList() {
+    const list = document.getElementById('wlList');
+    if (wlEntries.length === 0) {
+        list.innerHTML = '<p class="text-xs text-gray-500 w-full text-center py-2">No chats whitelisted yet</p>';
+        return;
+    }
+    list.innerHTML = wlEntries.map(e => `
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
+                     ${e.type === 'group' ? 'bg-blue-500/10 text-blue-400' : 'bg-accent/10 text-accent'}">
+            ${e.type === 'group' ? '&#128101;' : '&#128100;'}
+            ${escHtml(e.name)}
+            <button onclick="removeWlEntry('${escAttr(e.chat_id)}')" class="hover:text-red-400 transition-colors ml-0.5">&times;</button>
+        </span>
+    `).join('');
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s) { return s.replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+async function loadWhitelist() {
+    try {
+        const res = await fetch('/api/whitelist');
+        const data = await res.json();
+        wlEnabled = data.enabled;
+        wlEntries = data.entries || [];
+        updateWlUI();
+    } catch {}
+}
+
+async function toggleWhitelist() {
+    if (!dashboardReady) return;
+    const newVal = !wlEnabled;
+    try {
+        await fetch('/api/whitelist/enabled', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: newVal })
+        });
+        wlEnabled = newVal;
+        updateWlUI();
+    } catch (err) { console.error('Whitelist toggle failed:', err); }
+}
+
+async function removeWlEntry(chatId) {
+    if (!dashboardReady) return;
+    try {
+        await fetch('/api/whitelist/entry/' + encodeURIComponent(chatId), { method: 'DELETE' });
+        wlEntries = wlEntries.filter(e => e.chat_id !== chatId);
+        updateWlUI();
+    } catch (err) { console.error('Remove failed:', err); }
+}
+
+async function addWlEntry(id, name, type) {
+    if (!dashboardReady) return;
+    try {
+        await fetch('/api/whitelist/entry', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: id, name, type })
+        });
+        wlEntries.push({ chat_id: id, name, type });
+        updateWlUI();
+        renderPickerList();
+    } catch (err) { console.error('Add failed:', err); }
+}
+
+// ---- Picker ----
+
+async function openPicker() {
+    document.getElementById('pickerOverlay').classList.remove('hidden');
+    document.getElementById('pickerSearch').value = '';
+    pickerTab = 'contacts';
+    switchTab('contacts');
+}
+
+function closePicker(e) {
+    if (e && e.target !== e.currentTarget) return;
+    document.getElementById('pickerOverlay').classList.add('hidden');
+}
+
+async function switchTab(tab) {
+    pickerTab = tab;
+    document.getElementById('tabContacts').className = tab === 'contacts'
+        ? 'flex-1 py-1.5 text-sm rounded-lg font-medium bg-accent/10 text-accent'
+        : 'flex-1 py-1.5 text-sm rounded-lg font-medium bg-surface-light text-gray-400';
+    document.getElementById('tabGroups').className = tab === 'groups'
+        ? 'flex-1 py-1.5 text-sm rounded-lg font-medium bg-accent/10 text-accent'
+        : 'flex-1 py-1.5 text-sm rounded-lg font-medium bg-surface-light text-gray-400';
+
+    document.getElementById('pickerLoading').textContent = 'Loading...';
+    document.getElementById('pickerLoading').classList.remove('hidden');
+
+    try {
+        if (tab === 'contacts' && pickerContacts.length === 0) {
+            const res = await fetch('/api/contacts');
+            pickerContacts = await res.json();
+        }
+        if (tab === 'groups' && pickerGroups.length === 0) {
+            const res = await fetch('/api/groups');
+            pickerGroups = await res.json();
+        }
+    } catch {}
+
+    document.getElementById('pickerLoading').classList.add('hidden');
+    renderPickerList();
+}
+
+function filterPicker() { renderPickerList(); }
+
+function renderPickerList() {
+    const list = document.getElementById('pickerList');
+    const loading = document.getElementById('pickerLoading');
+    const query = (document.getElementById('pickerSearch').value || '').toLowerCase();
+    const whitelistedIds = new Set(wlEntries.map(e => e.chat_id));
+    let items = pickerTab === 'contacts'
+        ? pickerContacts.map(c => ({ id: c.id, name: c.name, sub: c.number || '', type: 'contact' }))
+        : pickerGroups.map(g => ({ id: g.id, name: g.name, sub: g.participantCount + ' members', type: 'group' }));
+
+    if (query) items = items.filter(i => i.name.toLowerCase().includes(query) || i.sub.toLowerCase().includes(query));
+
+    if (items.length === 0) {
+        loading.textContent = query ? 'No results' : 'None found';
+        loading.classList.remove('hidden');
+        list.innerHTML = '';
+        return;
+    }
+    loading.classList.add('hidden');
+
+    list.innerHTML = items.slice(0, 100).map(i => {
+        const added = whitelistedIds.has(i.id);
+        return `<button ${added ? 'disabled' : `onclick="addWlEntry('${escAttr(i.id)}','${escAttr(i.name)}','${i.type}')"`}
+            class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-colors
+                   ${added ? 'opacity-40 cursor-default' : 'hover:bg-surface-light cursor-pointer'}">
+            <div class="w-8 h-8 rounded-full ${i.type === 'group' ? 'bg-blue-500/10' : 'bg-accent/10'} flex items-center justify-center text-sm">
+                ${i.type === 'group' ? '&#128101;' : '&#128100;'}
+            </div>
+            <div class="flex-1 min-w-0">
+                <p class="text-sm text-white truncate">${escHtml(i.name)}</p>
+                <p class="text-xs text-gray-500 truncate">${escHtml(i.sub)}</p>
+            </div>
+            ${added ? '<span class="text-xs text-accent">Added</span>' : '<span class="text-xs text-gray-500">Add</span>'}
+        </button>`;
+    }).join('');
+}
+
 </script>
 </body>
 </html>
