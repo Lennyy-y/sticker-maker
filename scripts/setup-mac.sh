@@ -19,8 +19,8 @@ else
 fi
 
 # ---- System dependencies ----
-echo "[2/6] Installing system dependencies (python, node@18, ffmpeg)..."
-brew install python node@18 ffmpeg 2>/dev/null || true
+echo "[2/6] Installing system dependencies (python, node@18, ffmpeg, chromium)..."
+brew install python node@18 ffmpeg chromium 2>/dev/null || true
 
 # Ensure node@18 is on PATH (brew doesn't link keg-only formulae by default)
 NODE18_BIN="$(brew --prefix node@18)/bin"
@@ -49,7 +49,7 @@ deactivate
 # ---- Node.js dependencies ----
 echo "[4/6] Installing Node.js dependencies (bot)..."
 cd "$REPO_ROOT"
-npm install
+PUPPETEER_SKIP_DOWNLOAD=true npm install
 
 echo "[5/6] Installing Node.js dependencies (web-gui)..."
 cd "$REPO_ROOT/web-gui"

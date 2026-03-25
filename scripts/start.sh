@@ -56,12 +56,27 @@ else
     echo "[1/3] Skipping matting service (--lite mode)"
 fi
 
+# ---- Resolve Chromium path for Puppeteer ----
+CHROME_PATH=""
+if [ -f "$(brew --prefix 2>/dev/null)/bin/chromium" ]; then
+    CHROME_PATH="$(brew --prefix)/bin/chromium"
+elif [ -f "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif [ -f "/Applications/Chromium.app/Contents/MacOS/Chromium" ]; then
+    CHROME_PATH="/Applications/Chromium.app/Contents/MacOS/Chromium"
+fi
+
+if [ -z "$CHROME_PATH" ]; then
+    echo "Warning: No Chrome/Chromium found. Puppeteer may fail to start."
+fi
+
 # ---- Sticker bot ----
 echo "[2/3] Starting sticker bot..."
 (
     cd "$REPO_ROOT"
     MATTING_API_URL="http://localhost:8000" \
     DATA_DIR="$REPO_ROOT/data" \
+    PUPPETEER_EXECUTABLE_PATH="$CHROME_PATH" \
     exec ./node_modules/.bin/ts-node src/index.ts
 ) > "$LOG_DIR/bot.log" 2>&1 &
 echo "$!" >> "$PID_FILE"
