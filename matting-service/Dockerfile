@@ -35,6 +35,11 @@ RUN mkdir -p /app/checkpoints && \
     wget -q -O /app/checkpoints/sam2.1_hiera_large.pt \
     https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
 
+# Download rembg u2net model during build (~170MB)
+RUN mkdir -p /root/.u2net && \
+    wget -q -O /root/.u2net/u2net.onnx \
+    https://github.com/danielgatis/RemBG/releases/download/v0.0.0/u2net.onnx
+
 ENV PYTHONUNBUFFERED=1
 ENV SAM2_CHECKPOINT=/app/checkpoints/sam2.1_hiera_large.pt
 

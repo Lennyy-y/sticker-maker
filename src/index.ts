@@ -343,23 +343,40 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
 
         const allFrames = readdirSync(opts.framesDir).filter(f => f.endsWith('.png')).sort();
         const sourceFps = opts.framesFps || 15;
+        const effectiveSourceFps = sourceFps * opts.speed;
+
+        let overlayBuffer: Buffer | null = null;
+        if (opts.overlaySrc) {
+            try { overlayBuffer = readFileSync(opts.overlaySrc); } catch (e) {}
+        }
 
         for (let i = 0; i < borderlessProfiles.length; i++) {
             const profile = borderlessProfiles[i];
             const frameDurationMs = Math.round(1000 / profile.fps);
 
-            const targetCount = Math.max(1, Math.round(allFrames.length * profile.fps / sourceFps));
+            const targetCount = Math.max(1, Math.round(allFrames.length * profile.fps / effectiveSourceFps));
             const selectedFrames: string[] = [];
             for (let f = 0; f < targetCount; f++) {
                 const srcIdx = Math.min(Math.floor(f * allFrames.length / targetCount), allFrames.length - 1);
                 selectedFrames.push(allFrames[srcIdx]);
             }
 
+            let profileOverlay: Buffer | null = null;
+            if (overlayBuffer) {
+                profileOverlay = await sharp(overlayBuffer).resize(profile.size, profile.size, { fit: 'contain' }).toBuffer();
+            }
+
             const sharpFrames: { webpBuf: Buffer; durationMs: number }[] = [];
             for (const f of selectedFrames) {
                 const pngBuf = readFileSync(path.join(opts.framesDir, f));
-                const webpBuf = await sharp(pngBuf)
-                    .resize(profile.size, profile.size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+                let pipeline = sharp(pngBuf)
+                    .resize(profile.size, profile.size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } });
+                
+                if (profileOverlay) {
+                    pipeline = pipeline.composite([{ input: profileOverlay }]);
+                }
+
+                const webpBuf = await pipeline
                     .webp({ quality: profile.q, alphaQuality: 100 })
                     .toBuffer();
                 sharpFrames.push({ webpBuf, durationMs: frameDurationMs });
@@ -376,6 +393,7 @@ async function processVideoToWebp(buffer: Buffer, opts: VideoOptions): Promise<B
         }
 
         rmSync(opts.framesDir, { recursive: true, force: true });
+        if (opts.overlaySrc) try { unlinkSync(opts.overlaySrc); } catch (e) {}
         return result;
     }
 
@@ -486,11 +504,20 @@ interface ImageOptions {
  *  Borderless → WebP with alpha via sharp (guaranteed correct VP8X flags).
  *  Non-borderless → PNG via ffmpeg for scaling/cropping/overlay. */
 async function processImage(buffer: Buffer, opts: ImageOptions): Promise<{ buffer: Buffer; mimeType: string }> {
-    if (opts.borderless && !opts.overlaySrc) {
-        const webpBuf = await sharp(buffer)
-            .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-            .webp({ quality: 80, alphaQuality: 100 })
-            .toBuffer();
+    if (opts.borderless) {
+        let pipeline = sharp(buffer)
+            .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } });
+            
+        if (opts.overlaySrc) {
+            try {
+                const overlayBuffer = readFileSync(opts.overlaySrc);
+                const overlayLayer = await sharp(overlayBuffer).resize(512, 512, { fit: 'contain' }).toBuffer();
+                pipeline = pipeline.composite([{ input: overlayLayer }]);
+            } catch (e) {}
+        }
+        
+        const webpBuf = await pipeline.webp({ quality: 80, alphaQuality: 100 }).toBuffer();
+        if (opts.overlaySrc) try { unlinkSync(opts.overlaySrc); } catch (e) {}
         return { buffer: webpBuf, mimeType: 'image/webp' };
     }
 
