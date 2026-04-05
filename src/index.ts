@@ -59,6 +59,34 @@ function pushRequest(record: RequestRecord) {
 }
 
 // ============================================================
+// STICKER PACK SESSIONS — in-memory, per-user
+// ============================================================
+
+interface PackSticker {
+    id: string;
+    buffer: Buffer;
+    mimeType: string;
+}
+
+interface StickerPackSession {
+    userId: string;         // msg.author || msg.from (the person)
+    chatId: string;         // msg.from (the chat — group ID or DM)
+    name: string;           // pack name
+    stickers: Map<string, PackSticker>;
+    sentMsgToStickerId: Map<string, string>;  // sentMsg._serialized → stickerId
+    lastActivityAt: number;
+    startedAt: number;
+}
+
+const activePackSessions = new Map<string, StickerPackSession>();
+const PACK_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_PACK_SIZE = 30;
+
+function getUserId(msg: any): string {
+    return msg.author || msg.from;
+}
+
+// ============================================================
 // WHITELIST (JSON file + in-memory Set for O(1) lookup)
 // ============================================================
 
@@ -747,6 +775,54 @@ client.on('disconnected', (reason) => {
 });
 
 // ============================================================
+// STICKER PACK HELPERS
+// ============================================================
+
+function cleanExpiredPackSessions() {
+    const now = Date.now();
+    for (const [userId, session] of activePackSessions) {
+        if (now - session.lastActivityAt > PACK_SESSION_TIMEOUT_MS) {
+            activePackSessions.delete(userId);
+            console.log(`[StickerPack] Session expired for ${userId}`);
+            try {
+                client.sendMessage(
+                    session.chatId,
+                    `⏰ Your sticker pack "${session.name}" session has expired after 30 minutes of inactivity. ${session.stickers.size} sticker(s) discarded.`,
+                );
+            } catch {}
+        }
+    }
+}
+
+setInterval(cleanExpiredPackSessions, 5 * 60 * 1000);
+
+async function finalizeAndSendPack(session: StickerPackSession, msg: any) {
+    const stickers = [...session.stickers.values()];
+    activePackSessions.delete(session.userId);
+
+    await msg.reply(
+        `📦 Sending your sticker pack "${session.name}" (${stickers.length} sticker${stickers.length !== 1 ? 's' : ''})...`,
+    );
+
+    const chat = await msg.getChat();
+    for (let i = 0; i < stickers.length; i++) {
+        const s = stickers[i];
+        const media = new MessageMedia(s.mimeType, s.buffer.toString('base64'), 'sticker.webp');
+        await chat.sendMessage(media, {
+            sendMediaAsSticker: true,
+            stickerName: session.name,
+            stickerAuthor: 'Sticker Bot',
+        });
+        // Small delay between stickers to avoid rate-limiting
+        if (i < stickers.length - 1) await new Promise(r => setTimeout(r, 800));
+    }
+
+    await chat.sendMessage(
+        `✅ Pack "${session.name}" complete! (${stickers.length} sticker${stickers.length !== 1 ? 's' : ''})`,
+    );
+}
+
+// ============================================================
 // MESSAGE HANDLER — CLEAN PIPELINE
 // ============================================================
 
@@ -924,11 +1000,49 @@ client.on('message_create', async (msg) => {
                     media.filename || 'sticker.mp4'
                 );
 
-                await msg.reply(processedMedia, undefined, {
-                    sendMediaAsSticker: true,
-                    stickerName: 'Generated via Bot',
-                    stickerAuthor: 'My Sticker Bot'
-                });
+                // Check for active sticker pack session
+                const packUserId = getUserId(msg);
+                const packSession = activePackSessions.get(packUserId);
+
+                if (packSession && packSession.chatId === msg.from) {
+                    // ---- PACK MODE: accumulate sticker ----
+                    const stickerId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+                    packSession.stickers.set(stickerId, {
+                        id: stickerId,
+                        buffer: Buffer.from(mediaBuffer),
+                        mimeType: finalMimeType,
+                    });
+                    packSession.lastActivityAt = Date.now();
+
+                    // Send preview sticker (generic metadata so it doesn't mix with final pack)
+                    const sentMsg = await msg.reply(processedMedia, undefined, {
+                        sendMediaAsSticker: true,
+                        stickerName: 'Preview',
+                        stickerAuthor: 'Sticker Bot',
+                    });
+
+                    // Track sent message ID for /remove support
+                    if (sentMsg?.id?._serialized) {
+                        packSession.sentMsgToStickerId.set(sentMsg.id._serialized, stickerId);
+                    }
+
+                    const count = packSession.stickers.size;
+                    if (count >= MAX_PACK_SIZE) {
+                        await finalizeAndSendPack(packSession, msg);
+                    } else {
+                        await msg.reply(
+                            `✅ ${count}/${MAX_PACK_SIZE} stickers added to "${packSession.name}"\n` +
+                            `Send more /sticker commands, /stop to finish, or /cancel to discard.`,
+                        );
+                    }
+                } else {
+                    // ---- NORMAL MODE: send sticker directly ----
+                    await msg.reply(processedMedia, undefined, {
+                        sendMediaAsSticker: true,
+                        stickerName: 'Generated via Bot',
+                        stickerAuthor: 'My Sticker Bot'
+                    });
+                }
 
                 record.status = 'done';
                 io.emit('request:update', { id: requestId, status: 'done' });
@@ -945,6 +1059,123 @@ client.on('message_create', async (msg) => {
                 await msg.reply('Oops, something went wrong while creating your sticker.');
             }
         });
+    } else if (command === '/stickerpack') {
+        // ---- START A NEW STICKER PACK SESSION ----
+        const userId = getUserId(msg);
+
+        if (activePackSessions.has(userId)) {
+            await msg.reply(
+                '⚠️ You already have a sticker pack in progress!\n' +
+                'Use /stop to finish it or /cancel to discard it.',
+            );
+            return;
+        }
+
+        // Parse optional pack name from remaining args
+        let packName = 'Custom Pack';
+        if (rawArgs.length > 1) {
+            packName = rawArgs.slice(1).join(' ').replace(/^"|"$/g, '');
+        }
+
+        const session: StickerPackSession = {
+            userId,
+            chatId: msg.from,
+            name: packName,
+            stickers: new Map(),
+            sentMsgToStickerId: new Map(),
+            lastActivityAt: Date.now(),
+            startedAt: Date.now(),
+        };
+        activePackSessions.set(userId, session);
+
+        await msg.reply(
+            `📦 Sticker pack "${packName}" started!\n\n` +
+            `Now send /sticker commands with media to add stickers (up to ${MAX_PACK_SIZE}).\n\n` +
+            `Commands:\n` +
+            `• /sticker [flags] — add a sticker to the pack\n` +
+            `• /remove — reply to a preview sticker to remove it\n` +
+            `• /stop — finish and send the completed pack\n` +
+            `• /cancel — discard the entire pack\n\n` +
+            `⏰ Session expires after 30 minutes of inactivity.`,
+        );
+
+    } else if (command === '/stop') {
+        // ---- FINALIZE AND SEND THE STICKER PACK ----
+        const userId = getUserId(msg);
+        const session = activePackSessions.get(userId);
+
+        if (!session) return; // silently ignore if no session
+
+        if (session.chatId !== msg.from) {
+            await msg.reply(`Your sticker pack "${session.name}" is in a different chat. Go there to use /stop.`);
+            return;
+        }
+
+        if (session.stickers.size === 0) {
+            activePackSessions.delete(userId);
+            await msg.reply('No stickers were added to the pack. Pack discarded.');
+            return;
+        }
+
+        await finalizeAndSendPack(session, msg);
+
+    } else if (command === '/cancel') {
+        // ---- CANCEL AND DISCARD THE STICKER PACK ----
+        const userId = getUserId(msg);
+        const session = activePackSessions.get(userId);
+
+        if (!session) return; // silently ignore if no session
+
+        if (session.chatId !== msg.from) {
+            await msg.reply(`Your sticker pack "${session.name}" is in a different chat. Go there to use /cancel.`);
+            return;
+        }
+
+        const count = session.stickers.size;
+        activePackSessions.delete(userId);
+        await msg.reply(
+            `❌ Sticker pack "${session.name}" cancelled. ${count} sticker${count !== 1 ? 's' : ''} discarded.`,
+        );
+
+    } else if (command === '/remove') {
+        // ---- REMOVE A STICKER FROM THE PACK (reply to a preview) ----
+        const userId = getUserId(msg);
+        const session = activePackSessions.get(userId);
+
+        if (!session || session.chatId !== msg.from) {
+            // Only respond if it looks intentional (has a quoted message)
+            if (msg.hasQuotedMsg) {
+                await msg.reply('You don\'t have a sticker pack in progress.');
+            }
+            return;
+        }
+
+        if (!msg.hasQuotedMsg) {
+            await msg.reply('Reply to a preview sticker with /remove to remove it from the pack.');
+            return;
+        }
+
+        try {
+            const quotedMsg = await msg.getQuotedMessage();
+            const quotedId = quotedMsg.id._serialized;
+            const stickerId = session.sentMsgToStickerId.get(quotedId);
+
+            if (!stickerId || !session.stickers.has(stickerId)) {
+                await msg.reply('That message is not a sticker in your current pack.');
+                return;
+            }
+
+            session.stickers.delete(stickerId);
+            session.sentMsgToStickerId.delete(quotedId);
+            session.lastActivityAt = Date.now();
+
+            const count = session.stickers.size;
+            await msg.reply(
+                `🗑️ Sticker removed! ${count}/${MAX_PACK_SIZE} stickers remaining in "${session.name}".`,
+            );
+        } catch {
+            await msg.reply('Could not find the quoted message. Try again.');
+        }
     }
 });
 
